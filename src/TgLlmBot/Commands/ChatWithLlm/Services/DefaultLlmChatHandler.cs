@@ -68,16 +68,17 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
     public async Task HandleCommandAsync(ChatWithLlmCommand command, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(command);
+        var text = command.Message.Text?.Trim();
 
-        if (command.Message.Text?.Trim() == "!Альфа")
+        if (text == "!Альфа")
         {
             await _bot.SendMessage(
                 command.Message.Chat,
                 """
-                 !Альфа - список специальных команд бота.
-                 !Альфа репу - Ссылка на репозиторий.
-                 !Альфа статус - Проверка активности бота.
-                 """,
+                !Альфа - список специальных команд бота.
+                !Альфа репу - Ссылка на репозиторий.
+                !Альфа статус - Проверка активности бота.
+                """,
                 ParseMode.None,
                 new()
                 {
@@ -88,14 +89,14 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
             return;
         }
 
-        if (command.Message.Text?.Trim() == "!Альфа репу")
+        if (text == "!Альфа репу")
         {
             await _bot.SendMessage(
                 command.Message.Chat,
                 """
-                 Ссылка на репозиторий с моим кодом тут:
-                 https://github.com/NetGreenChat/TgLlmBot
-                 """,
+                Ссылка на репозиторий с моим кодом тут:
+                https://github.com/NetGreenChat/TgLlmBot
+                """,
                 ParseMode.None,
                 new()
                 {
@@ -106,7 +107,7 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
             return;
         }
 
-        if (command.Message.Text?.Trim() == "!Альфа статус")
+        if (text == "!Альфа статус")
         {
             await _bot.SendMessage(
                 command.Message.Chat,
