@@ -68,6 +68,59 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
     public async Task HandleCommandAsync(ChatWithLlmCommand command, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(command);
+
+        if (command.Message.Text?.Trim() == "!Альфа")
+        {
+            await _bot.SendMessage(
+                command.Message.Chat,
+                """
+                 !Альфа - список специальных команд бота.
+                 !Альфа репу - Ссылка на репозиторий.
+                 !Альфа статус - Проверка активности бота.
+                 """,
+                ParseMode.None,
+                new()
+                {
+                    MessageId = command.Message.MessageId
+                },
+                cancellationToken: cancellationToken
+            );
+            return;
+        }
+
+        if (command.Message.Text?.Trim() == "!Альфа репу")
+        {
+            await _bot.SendMessage(
+                command.Message.Chat,
+                """
+                 Ссылка на репозиторий с моим кодом тут:
+                 https://github.com/NetGreenChat/TgLlmBot
+                 """,
+                ParseMode.None,
+                new()
+                {
+                    MessageId = command.Message.MessageId
+                },
+                cancellationToken: cancellationToken
+            );
+            return;
+        }
+
+        if (command.Message.Text?.Trim() == "!Альфа статус")
+        {
+            await _bot.SendMessage(
+                command.Message.Chat,
+                "Активен.",
+                ParseMode.None,
+                new()
+                {
+                    MessageId = command.Message.MessageId
+                },
+                cancellationToken: cancellationToken
+            );
+            return;
+        }
+
         Log.ProcessingLlmRequest(_logger, command.Message.From?.Username, command.Message.From?.Id);
         var contextMessages = await _storage.SelectContextMessagesAsync(command.Message, cancellationToken);
 
