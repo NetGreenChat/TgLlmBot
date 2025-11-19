@@ -51,7 +51,7 @@ public class DisplayHelpCommandHandler : AbstractCommandHandler<DisplayHelpComma
         builder.AppendLine("`!repo` - ссылка на GitHub репозиторий с исходным кодом бота");
         builder.AppendLine("`!usage` - статистика использования API ключа");
         builder.AppendLine("`!rating` - показывает рейтинг самых активных пользователей в чате");
-        builder.AppendLine("`!totalUsage` - показывает рейтинг самых активных пользователей бота из этого чата");
+        builder.AppendLine("`!top` - показывает рейтинг самых активных пользователей бота из этого чата");
         var rawMarkdown = builder.ToString();
         var optimizedMarkdown = markdownConverter.ConvertToTelegramMarkdown(rawMarkdown);
         return optimizedMarkdown;
