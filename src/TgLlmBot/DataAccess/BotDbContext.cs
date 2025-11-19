@@ -16,11 +16,15 @@ public class BotDbContext : DbContext
 
     public DbSet<KickedUser> KickedUsers { get; set; }
 
+    public DbSet<DbUsageByUserCount> UsageByUserCounts { get; set; }
+
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         ArgumentNullException.ThrowIfNull(modelBuilder);
         modelBuilder.ApplyConfiguration(new DbChatMessageEntityTypeConfiguration());
         modelBuilder.ApplyConfiguration(new KickedUserEntityTypeConfiguration());
+        modelBuilder.ApplyConfiguration(new DbUsageByUserCountTypeConfiguration());
         base.OnModelCreating(modelBuilder);
     }
 }

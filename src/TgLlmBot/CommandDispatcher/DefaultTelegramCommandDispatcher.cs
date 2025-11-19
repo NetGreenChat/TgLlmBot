@@ -10,6 +10,7 @@ using TgLlmBot.Commands.Model;
 using TgLlmBot.Commands.Ping;
 using TgLlmBot.Commands.Rating;
 using TgLlmBot.Commands.Repo;
+using TgLlmBot.Commands.TotalUsage;
 using TgLlmBot.Commands.Usage;
 using TgLlmBot.Services.DataAccess;
 using TgLlmBot.Services.Telegram.SelfInformation;
@@ -36,6 +37,7 @@ public class DefaultTelegramCommandDispatcher : ITelegramCommandDispatcher
     private readonly RepoCommandHandler _repoCommandHandler;
     private readonly ITelegramSelfInformation _selfInformation;
     private readonly UsageCommandHandler _usageCommandHandler;
+    private readonly TotalUsageCommandHandler _totalUsageCommandHandler;
 
     public DefaultTelegramCommandDispatcher(
         DefaultTelegramCommandDispatcherOptions options,
@@ -47,7 +49,8 @@ public class DefaultTelegramCommandDispatcher : ITelegramCommandDispatcher
         RepoCommandHandler repoCommandHandler,
         ModelCommandHandler modelCommandHandler,
         UsageCommandHandler usageCommandHandler,
-        RatingCommandHandler ratingCommandHandler)
+        RatingCommandHandler ratingCommandHandler,
+        TotalUsageCommandHandler totalUsageCommandHandler)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(selfInformation);
@@ -59,6 +62,7 @@ public class DefaultTelegramCommandDispatcher : ITelegramCommandDispatcher
         ArgumentNullException.ThrowIfNull(modelCommandHandler);
         ArgumentNullException.ThrowIfNull(usageCommandHandler);
         ArgumentNullException.ThrowIfNull(ratingCommandHandler);
+        ArgumentNullException.ThrowIfNull(totalUsageCommandHandler);
         _options = options;
         _selfInformation = selfInformation;
         _messageStorage = messageStorage;
@@ -69,6 +73,7 @@ public class DefaultTelegramCommandDispatcher : ITelegramCommandDispatcher
         _modelCommandHandler = modelCommandHandler;
         _usageCommandHandler = usageCommandHandler;
         _ratingCommandHandler = ratingCommandHandler;
+        _totalUsageCommandHandler = totalUsageCommandHandler;
     }
 
     public async Task HandleMessageAsync(Message? message, UpdateType type, CancellationToken cancellationToken)
@@ -123,6 +128,12 @@ public class DefaultTelegramCommandDispatcher : ITelegramCommandDispatcher
                 {
                     var command = new RatingCommand(message, type);
                     await _ratingCommandHandler.HandleAsync(command, cancellationToken);
+                    return;
+                }
+            case "!totalUsage":
+                {
+                    var command = new TotalUsageCommand(message, type);
+                    await _totalUsageCommandHandler.HandleAsync(command, cancellationToken);
                     return;
                 }
         }

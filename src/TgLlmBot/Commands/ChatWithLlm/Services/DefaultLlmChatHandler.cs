@@ -41,6 +41,7 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
     private readonly ILogger<DefaultLlmChatHandler> _logger;
     private readonly DefaultLlmChatHandlerOptions _options;
     private readonly ITelegramMessageStorage _storage;
+    private readonly ITelegramUsageByUserCountStorage _usageByUserCountStorage;
     private readonly ITelegramMarkdownConverter _telegramMarkdownConverter;
     private readonly TimeProvider _timeProvider;
     private readonly IMcpToolsProvider _tools;
@@ -54,7 +55,8 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
         ITelegramMessageStorage storage,
         IMcpToolsProvider tools,
         ILogger<DefaultLlmChatHandler> logger,
-        ICostContextStorage costContextStorage)
+        ICostContextStorage costContextStorage,
+        ITelegramUsageByUserCountStorage usageByUserCountStorage)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(timeProvider);
@@ -72,6 +74,7 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
         _telegramMarkdownConverter = telegramMarkdownConverter;
         _logger = logger;
         _costContextStorage = costContextStorage;
+        _usageByUserCountStorage = usageByUserCountStorage;
         _storage = storage;
         _tools = tools;
     }
@@ -162,6 +165,23 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
                 }
 
                 await _storage.StoreMessageAsync(response, command.Self, cancellationToken);
+            }
+
+            try
+            {
+                var userId = command.Message.From?.Id;
+                if (userId != null)
+                {
+                    await _usageByUserCountStorage.IncreaseUsageCountByOne(command.Message.Chat.Id, userId.Value, command.Message.From?.Username, command.Message.From?.FirstName, command.Message.From?.LastName, costInUsd);
+                }
+                else
+                {
+                    Log.IncreaseUsageCountByUserFailed(_logger, "command.Message.From?.Id == null");
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.IncreaseUsageCountByUserFailed(_logger, ex);
             }
         }
         catch (Exception ex)
@@ -457,5 +477,11 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
 
         [LoggerMessage(Level = LogLevel.Error, Message = "Failed to convert to Telegram Markdown or send message")]
         public static partial void MarkdownConversionOrSendFailed(ILogger logger, Exception exception);
+
+        [LoggerMessage(Level = LogLevel.Error, Message = "Failed to increase usage count by user ({reason})")]
+        public static partial void IncreaseUsageCountByUserFailed(ILogger logger, string reason);
+
+        [LoggerMessage(Level = LogLevel.Error, Message = "Failed to increase usage count by user (exception)")]
+        public static partial void IncreaseUsageCountByUserFailed(ILogger logger, Exception exception);
     }
 }

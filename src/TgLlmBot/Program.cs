@@ -27,6 +27,7 @@ using TgLlmBot.Commands.DisplayHelp;
 using TgLlmBot.Commands.Model;
 using TgLlmBot.Commands.Ping;
 using TgLlmBot.Commands.Repo;
+using TgLlmBot.Commands.TotalUsage;
 using TgLlmBot.Commands.Usage;
 using TgLlmBot.Configuration.Options;
 using TgLlmBot.Configuration.TypedConfiguration;
@@ -170,6 +171,7 @@ public partial class Program
         builder.Services.AddSingleton<RepoCommandHandler>();
         builder.Services.AddSingleton<UsageCommandHandler>();
         builder.Services.AddSingleton<RatingCommandHandler>();
+        builder.Services.AddSingleton<TotalUsageCommandHandler>();
         // Channel to communicate with LLM
         var llmRequestChannel = Channel.CreateBounded<ChatWithLlmCommand>(new BoundedChannelOptions(20)
         {
@@ -238,6 +240,7 @@ public partial class Program
         });
         builder.Services.AddSingleton<ITelegramMessageStorage, DefaultTelegramMessageStorage>();
         builder.Services.AddSingleton<ITelegramKickedUsersStorage, DefaultTelegramKickedUsersStorage>();
+        builder.Services.AddSingleton<ITelegramUsageByUserCountStorage, DefaultTelegramUsageByUserCountStorage>();
         // MCP
         builder.Services.AddSingleton<DefaultMcpToolsProvider>();
         builder.Services.AddSingleton<IMcpToolsProvider>(resolver => resolver.GetRequiredService<DefaultMcpToolsProvider>());
