@@ -130,7 +130,7 @@ public class DefaultTelegramCommandDispatcher : ITelegramCommandDispatcher
                     await _ratingCommandHandler.HandleAsync(command, cancellationToken);
                     return;
                 }
-            case "!totalUsage":
+            case "!top":
                 {
                     var command = new TotalUsageCommand(message, type);
                     await _totalUsageCommandHandler.HandleAsync(command, cancellationToken);
