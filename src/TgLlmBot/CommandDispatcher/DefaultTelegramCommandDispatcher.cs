@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
@@ -6,6 +6,7 @@ using Telegram.Bot.Types;
 using Telegram.Bot.Types.Enums;
 using TgLlmBot.Commands.ChatWithLlm;
 using TgLlmBot.Commands.DisplayHelp;
+using TgLlmBot.Commands.GetLimit;
 using TgLlmBot.Commands.Model;
 using TgLlmBot.Commands.Ping;
 using TgLlmBot.Commands.Rating;
@@ -49,6 +50,7 @@ public class DefaultTelegramCommandDispatcher : ITelegramCommandDispatcher
     private readonly ShowChatSystemPromptCommandHandler _showChatSystemPrompt;
     private readonly ShowPersonalSystemPromptCommandHandler _showPersonalSystemPrompt;
     private readonly UsageCommandHandler _usage;
+    private readonly GetLimitCommandHandler _getLimit;
 
     public DefaultTelegramCommandDispatcher(
         DefaultTelegramCommandDispatcherOptions options,
@@ -67,7 +69,8 @@ public class DefaultTelegramCommandDispatcher : ITelegramCommandDispatcher
         ResetPersonalSystemPromptCommandHandler resetPersonalSystemPrompt,
         ShowChatSystemPromptCommandHandler showChatSystemPrompt,
         ShowPersonalSystemPromptCommandHandler showPersonalSystemPrompt,
-        SetLimitCommandHandler setLimit)
+        SetLimitCommandHandler setLimit,
+        GetLimitCommandHandler getLimit)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(self);
@@ -86,6 +89,7 @@ public class DefaultTelegramCommandDispatcher : ITelegramCommandDispatcher
         ArgumentNullException.ThrowIfNull(showChatSystemPrompt);
         ArgumentNullException.ThrowIfNull(showPersonalSystemPrompt);
         ArgumentNullException.ThrowIfNull(setLimit);
+        ArgumentNullException.ThrowIfNull(getLimit);
         _options = options;
         _self = self;
         _messageStorage = messageStorage;
@@ -103,6 +107,7 @@ public class DefaultTelegramCommandDispatcher : ITelegramCommandDispatcher
         _showChatSystemPrompt = showChatSystemPrompt;
         _showPersonalSystemPrompt = showPersonalSystemPrompt;
         _setLimit = setLimit;
+        _getLimit = getLimit;
     }
 
     public async Task HandleMessageAsync(Message? message, UpdateType type, CancellationToken cancellationToken)
@@ -183,6 +188,12 @@ public class DefaultTelegramCommandDispatcher : ITelegramCommandDispatcher
                 {
                     var command = new ShowChatSystemPromptCommand(message, type, self);
                     await _showChatSystemPrompt.HandleAsync(command, cancellationToken);
+                    return;
+                }
+            case "!get_limit":
+                {
+                    var command = new GetLimitCommand(message, type, self);
+                    await _getLimit.HandleAsync(command, cancellationToken);
                     return;
                 }
         }

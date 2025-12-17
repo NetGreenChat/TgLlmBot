@@ -23,6 +23,7 @@ using TgLlmBot.Commands.ChatWithLlm;
 using TgLlmBot.Commands.ChatWithLlm.BackgroundServices.LlmRequests;
 using TgLlmBot.Commands.ChatWithLlm.Services;
 using TgLlmBot.Commands.DisplayHelp;
+using TgLlmBot.Commands.GetLimit;
 using TgLlmBot.Commands.Model;
 using TgLlmBot.Commands.Ping;
 using TgLlmBot.Commands.Rating;
@@ -193,6 +194,7 @@ public partial class Program
         builder.Services.AddSingleton<ShowPersonalSystemPromptCommandHandler>();
         builder.Services.AddSingleton<ShowChatSystemPromptCommandHandler>();
         builder.Services.AddSingleton<SetLimitCommandHandler>();
+        builder.Services.AddSingleton<GetLimitCommandHandler>();
         // Channel to communicate with LLM
         var llmRequestChannel = Channel.CreateBounded<ChatWithLlmCommand>(new BoundedChannelOptions(20)
         {

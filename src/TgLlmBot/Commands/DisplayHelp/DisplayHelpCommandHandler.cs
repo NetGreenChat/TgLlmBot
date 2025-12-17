@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -65,6 +65,7 @@ public class DisplayHelpCommandHandler : AbstractCommandHandler<DisplayHelpComma
         builder.AppendLine("* `!personal_role_show` - показывает текущий системный для общения конкретно с тобой");
         builder.AppendLine(
             "* `!set_limit` - устанавливает пользователю лимит на общение с LLM (для этого нужно отправить эту команду реплаем на сообщение того, кому нужно установить лимит и указать количество сообщений, которое будет ему доступно в день; например: `!set_limit 5`)");
+        builder.AppendLine("* `!get_limit` - показывает твой дневной лимит сообщений");
         var rawMarkdown = builder.ToString();
         var optimizedMarkdown = markdownConverter.ConvertToSolidTelegramMarkdown(rawMarkdown);
         return optimizedMarkdown;

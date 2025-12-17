@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Diagnostics.CodeAnalysis;
 using System.Linq;
 using System.Threading;
@@ -8,6 +8,8 @@ using Microsoft.Extensions.DependencyInjection;
 using Npgsql;
 using TgLlmBot.DataAccess;
 using TgLlmBot.DataAccess.Models;
+using TgLlmBot.Models;
+using TgLlmBot.Services.DataAccess.Limits.Models;
 
 namespace TgLlmBot.Services.DataAccess.Limits;
 
@@ -83,6 +85,34 @@ public class DefaultLlmLimitsService : ILlmLimitsService
                 new NpgsqlParameter($"{nameof(DbUserLimit.ChatId)}", chatId),
                 new NpgsqlParameter($"{nameof(DbUserLimit.UserId)}", userId),
                 new NpgsqlParameter($"{nameof(DbUserLimit.Limit)}", limit));
+        }
+    }
+
+    public async Task<DailyChatUsageStats> GetDailyLimitsAsync(long chatId, long userId, CancellationToken cancellationToken)
+    {
+        await using (var asyncScope = _serviceScopeFactory.CreateAsyncScope())
+        {
+            var dbContext = asyncScope.ServiceProvider.GetRequiredService<BotDbContext>();
+            var date = _timeProvider.GetUtcNow().Date.ToUniversalTime();
+            var dbLimits = await dbContext.Limits.AsNoTracking()
+                .Where(x => x.UserId == userId && x.ChatId == chatId)
+                .FirstOrDefaultAsync(cancellationToken);
+            if (dbLimits is not null)
+            {
+                var dbDailyUsage = await dbContext.Usage.AsNoTracking()
+                    .Where(x => x.UserId == userId && x.Date == date && x.ChatId == chatId)
+                    .FirstOrDefaultAsync(cancellationToken);
+
+                int used = 0;
+                if (dbDailyUsage is not null)
+                {
+                    used = dbDailyUsage.Used;
+                }
+                var remaining = dbLimits.Limit - used;
+                return new DailyChatUsageStats(used, dbLimits.Limit, remaining);
+            }
+
+            return new DailyChatUsageStats(0, null, null);
         }
     }
 }
