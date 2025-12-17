@@ -7,6 +7,7 @@ using Telegram.Bot.Types.Enums;
 using TgLlmBot.Commands.ChatWithLlm;
 using TgLlmBot.Commands.DisplayHelp;
 using TgLlmBot.Commands.GetLimit;
+using TgLlmBot.Commands.GetPersonal;
 using TgLlmBot.Commands.Model;
 using TgLlmBot.Commands.Ping;
 using TgLlmBot.Commands.Rating;
@@ -51,6 +52,7 @@ public class DefaultTelegramCommandDispatcher : ITelegramCommandDispatcher
     private readonly ShowPersonalSystemPromptCommandHandler _showPersonalSystemPrompt;
     private readonly UsageCommandHandler _usage;
     private readonly GetLimitCommandHandler _getLimit;
+    private readonly GetPersonalLimitCommandHandler _getPersonalLimit;
 
     public DefaultTelegramCommandDispatcher(
         DefaultTelegramCommandDispatcherOptions options,
@@ -70,7 +72,8 @@ public class DefaultTelegramCommandDispatcher : ITelegramCommandDispatcher
         ShowChatSystemPromptCommandHandler showChatSystemPrompt,
         ShowPersonalSystemPromptCommandHandler showPersonalSystemPrompt,
         SetLimitCommandHandler setLimit,
-        GetLimitCommandHandler getLimit)
+        GetLimitCommandHandler getLimit,
+        GetPersonalLimitCommandHandler getPersonalLimit)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(self);
@@ -90,6 +93,7 @@ public class DefaultTelegramCommandDispatcher : ITelegramCommandDispatcher
         ArgumentNullException.ThrowIfNull(showPersonalSystemPrompt);
         ArgumentNullException.ThrowIfNull(setLimit);
         ArgumentNullException.ThrowIfNull(getLimit);
+        ArgumentNullException.ThrowIfNull(getPersonalLimit);
         _options = options;
         _self = self;
         _messageStorage = messageStorage;
@@ -108,6 +112,7 @@ public class DefaultTelegramCommandDispatcher : ITelegramCommandDispatcher
         _showPersonalSystemPrompt = showPersonalSystemPrompt;
         _setLimit = setLimit;
         _getLimit = getLimit;
+        _getPersonalLimit = getPersonalLimit;
     }
 
     public async Task HandleMessageAsync(Message? message, UpdateType type, CancellationToken cancellationToken)
@@ -194,6 +199,12 @@ public class DefaultTelegramCommandDispatcher : ITelegramCommandDispatcher
                 {
                     var command = new GetLimitCommand(message, type, self);
                     await _getLimit.HandleAsync(command, cancellationToken);
+                    return;
+                }
+            case "!get_personal_limit":
+                {
+                    var command = new GetPersonalLimitCommand(message, type, self);
+                    await _getPersonalLimit.HandleAsync(command, cancellationToken);
                     return;
                 }
         }
