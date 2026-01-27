@@ -7,6 +7,8 @@ using Telegram.Bot.Types.Enums;
 using TgLlmBot.CommandDispatcher.Abstractions;
 using TgLlmBot.Services.DataAccess.SystemPrompts;
 using TgLlmBot.Services.DataAccess.TelegramMessages;
+using TgLlmBot.Commands.ChatWithLlm.Services;
+using TgLlmBot.Services.PromptRewrite;
 
 namespace TgLlmBot.Commands.SetPersonalSystemPrompt;
 
@@ -15,15 +17,26 @@ public class SetPersonalSystemPromptCommandHandler : AbstractCommandHandler<SetP
     private readonly TelegramBotClient _bot;
     private readonly ITelegramMessageStorage _storage;
     private readonly ISystemPromptService _systemPrompt;
+    private readonly IPromptRewriteService _promptRewrite;
+    private readonly DefaultLlmChatHandlerOptions _llmOptions;
 
-    public SetPersonalSystemPromptCommandHandler(TelegramBotClient bot, ISystemPromptService systemPrompt, ITelegramMessageStorage storage)
+    public SetPersonalSystemPromptCommandHandler(
+        TelegramBotClient bot,
+        ISystemPromptService systemPrompt,
+        ITelegramMessageStorage storage,
+        IPromptRewriteService promptRewrite,
+        DefaultLlmChatHandlerOptions llmOptions)
     {
         ArgumentNullException.ThrowIfNull(bot);
         ArgumentNullException.ThrowIfNull(systemPrompt);
         ArgumentNullException.ThrowIfNull(storage);
+        ArgumentNullException.ThrowIfNull(promptRewrite);
+        ArgumentNullException.ThrowIfNull(llmOptions);
         _bot = bot;
         _systemPrompt = systemPrompt;
         _storage = storage;
+        _promptRewrite = promptRewrite;
+        _llmOptions = llmOptions;
     }
 
     [SuppressMessage("Design", "CA1031:Do not catch general exception types")]
@@ -54,10 +67,15 @@ public class SetPersonalSystemPromptCommandHandler : AbstractCommandHandler<SetP
             }
             else
             {
-                await _systemPrompt.SetUserChatPromptAsync(command.Message.Chat.Id, command.Message.From.Id, prompt, cancellationToken);
+                var globalPrompt = DefaultLlmChatHandler.BuildBasePrompt(_llmOptions.BotName);
+                var rewriteResult = await _promptRewrite.RewriteIfViolatesAsync(globalPrompt, prompt, cancellationToken);
+                await _systemPrompt.SetUserChatPromptAsync(command.Message.Chat.Id, command.Message.From.Id, rewriteResult.Prompt, cancellationToken);
+                var message = rewriteResult.WasRewritten
+                    ? "✅ Персональный системный промпт изменён \\(скорректирован модератором\\)"
+                    : "✅ Персональный системный промпт успешно изменён";
                 var response = await _bot.SendMessage(
                     command.Message.Chat,
-                    "✅ Персональный системный промпт успешно изменён",
+                    message,
                     ParseMode.MarkdownV2,
                     new()
                     {

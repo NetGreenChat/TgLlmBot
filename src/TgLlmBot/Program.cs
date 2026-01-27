@@ -49,6 +49,7 @@ using TgLlmBot.Services.Mcp.Clients.Context7;
 using TgLlmBot.Services.Mcp.Clients.Github;
 using TgLlmBot.Services.Mcp.Enums;
 using TgLlmBot.Services.Mcp.Tools;
+using TgLlmBot.Services.PromptRewrite;
 using TgLlmBot.Services.OpenAIClient.Costs;
 using TgLlmBot.Services.OpenAIClient.HttpClient.DelegatingHandlers;
 using TgLlmBot.Services.OpenRouter;
@@ -264,6 +265,8 @@ public partial class Program
         builder.Services.AddSingleton<ITelegramKickedUsersStorage, DefaultTelegramKickedUsersStorage>();
         builder.Services.AddSingleton<ISystemPromptService, DefaultSystemPromptService>();
         builder.Services.AddSingleton<ILlmLimitsService, DefaultLlmLimitsService>();
+        // Prompt rewrite
+        builder.Services.AddSingleton<IPromptRewriteService, DefaultPromptRewriteService>();
         // MCP
         builder.Services.AddSingleton<DefaultMcpToolsProvider>();
         builder.Services.AddSingleton<IMcpToolsProvider>(resolver => resolver.GetRequiredService<DefaultMcpToolsProvider>());
