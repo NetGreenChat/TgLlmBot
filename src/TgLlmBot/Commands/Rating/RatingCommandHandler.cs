@@ -138,7 +138,7 @@ public class RatingCommandHandler : AbstractCommandHandler<RatingCommand>
                             MessageId = command.Message.MessageId
                         },
                         cancellationToken: cancellationToken);
-                    await _storage.StoreMessageAsync(response, command.Self, cancellationToken);
+                    await _storage.StoreMessageAsync(response, command.Self, cancellationToken, DbChatMessageKind.ServiceResponse);
                     return;
                 }
 
@@ -196,7 +196,7 @@ public class RatingCommandHandler : AbstractCommandHandler<RatingCommand>
                     MessageId = command.Message.MessageId
                 },
                 cancellationToken: cancellationToken);
-            await _storage.StoreMessageAsync(response, command.Self, cancellationToken);
+            await _storage.StoreMessageAsync(response, command.Self, cancellationToken, DbChatMessageKind.ServiceResponse);
         }
     }
 
@@ -235,7 +235,7 @@ public class RatingCommandHandler : AbstractCommandHandler<RatingCommand>
             }
         }
 
-        await _storage.StoreMessageAsync(response, command.Self, cancellationToken);
+        await _storage.StoreMessageAsync(response, command.Self, cancellationToken, DbChatMessageKind.ServiceResponse);
     }
 
     private static string BuildRatingReport(ShitposterStats[] stats, DbChatMessage[] contextMessages)

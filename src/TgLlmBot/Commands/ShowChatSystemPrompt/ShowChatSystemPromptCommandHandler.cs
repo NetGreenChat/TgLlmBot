@@ -1,9 +1,10 @@
-﻿using System;
+using System;
 using System.Threading;
 using System.Threading.Tasks;
 using Telegram.Bot;
 using Telegram.Bot.Types.Enums;
 using TgLlmBot.CommandDispatcher.Abstractions;
+using TgLlmBot.DataAccess.Models;
 using TgLlmBot.Services.DataAccess.SystemPrompts;
 using TgLlmBot.Services.DataAccess.TelegramMessages;
 using TgLlmBot.Services.Telegram.Markdown;
@@ -49,7 +50,7 @@ public class ShowChatSystemPromptCommandHandler : AbstractCommandHandler<ShowCha
                     MessageId = command.Message.MessageId
                 },
                 cancellationToken: cancellationToken);
-            await _storage.StoreMessageAsync(response, command.Self, cancellationToken);
+            await _storage.StoreMessageAsync(response, command.Self, cancellationToken, DbChatMessageKind.ServiceResponse);
         }
         else
         {
@@ -69,8 +70,8 @@ public class ShowChatSystemPromptCommandHandler : AbstractCommandHandler<ShowCha
                 customPrompt,
                 ParseMode.MarkdownV2,
                 cancellationToken: cancellationToken);
-            await _storage.StoreMessageAsync(okStatusMessage, command.Self, cancellationToken);
-            await _storage.StoreMessageAsync(promptMessage, command.Self, cancellationToken);
+            await _storage.StoreMessageAsync(okStatusMessage, command.Self, cancellationToken, DbChatMessageKind.ServiceResponse);
+            await _storage.StoreMessageAsync(promptMessage, command.Self, cancellationToken, DbChatMessageKind.ServiceResponse);
         }
     }
 }

@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
@@ -25,12 +25,15 @@ using TgLlmBot.Services.Resources;
 using TgLlmBot.Services.Telegram.Markdown;
 using TgLlmBot.Services.Telegram.TypingStatus;
 using ChatMessage = Microsoft.Extensions.AI.ChatMessage;
+using TgLlmBot.Commands.ChatWithLlm.Context;
 
 namespace TgLlmBot.Commands.ChatWithLlm.Services;
 
 public partial class DefaultLlmChatHandler : ILlmChatHandler
 {
     private static readonly CultureInfo RuCulture = new("ru-RU");
+
+    private readonly ILlmContextBuilder _contextBuilder;
 
     private static readonly JsonSerializerOptions HistorySerializationOptions = new(JsonSerializerDefaults.General)
     {
@@ -53,6 +56,7 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
     private readonly ITypingStatusService _typingStatusService;
 
     public DefaultLlmChatHandler(
+        ILlmContextBuilder contextBuilder,
         DefaultLlmChatHandlerOptions options,
         TimeProvider timeProvider,
         TelegramBotClient bot,
@@ -65,7 +69,7 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
         ITypingStatusService typingStatusService,
         ILlmLimitsService limits,
         ILogger<DefaultLlmChatHandler> logger)
-    {
+    {    
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(timeProvider);
         ArgumentNullException.ThrowIfNull(bot);
@@ -78,6 +82,7 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
         ArgumentNullException.ThrowIfNull(typingStatusService);
         ArgumentNullException.ThrowIfNull(limits);
         ArgumentNullException.ThrowIfNull(logger);
+        ArgumentNullException.ThrowIfNull(contextBuilder);
         _options = options;
         _timeProvider = timeProvider;
         _bot = bot;
@@ -90,6 +95,7 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
         _typingStatusService = typingStatusService;
         _limits = limits;
         _logger = logger;
+        _contextBuilder = contextBuilder;
     }
 
     [SuppressMessage("Design", "CA1031:Do not catch general exception types")]
@@ -117,7 +123,7 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
                             MessageId = command.Message.MessageId
                         },
                         cancellationToken: cancellationToken);
-                    await _storage.StoreMessageAsync(response, command.Self, cancellationToken);
+                    await _storage.StoreMessageAsync(response, command.Self, cancellationToken, DbChatMessageKind.ServiceResponse);
                     return;
                 }
 
@@ -125,24 +131,34 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
             }
 
             var contextMessages = await _storage.SelectContextMessagesAsync(command.Message, cancellationToken);
-            var context = await BuildContextAsync(command, contextMessages, cancellationToken);
+
+            var context = await _contextBuilder.BuildAsync(new LlmContextBuildRequest
+            {
+                Command = command,
+                ContextMessages = contextMessages,
+                CancellationToken = cancellationToken
+            });
             var tools = _tools.GetTools();
             var chatOptions = new ChatOptions
             {
-                ConversationId = Guid.NewGuid().ToString("N"),
-                Tools = [..tools],
-                // Temperature = 0.8f,
-                // TopK = 40,
-                // TopP = 0.8f,
-                AllowMultipleToolCalls = true,
-                ToolMode = new AutoChatToolMode()
+                //ConversationId = Guid.NewGuid().ToString("N"),
+                //Tools = [..tools],
+                //// Temperature = 0.8f,
+                //// TopK = 40,
+                //// TopP = 0.8f,
+                //AllowMultipleToolCalls = true,
+                //ToolMode = new AutoChatToolMode()
+
+                ConversationId = Guid.NewGuid().ToString("N")
             };
             var llmResponse = await _chatClient.GetResponseAsync(context, chatOptions, cancellationToken);
             var rawLLmResponse = llmResponse.Text.Trim();
             var llmResponseText = rawLLmResponse;
+            var responseKind = DbChatMessageKind.AssistantMessage;
             if (string.IsNullOrWhiteSpace(rawLLmResponse))
             {
                 llmResponseText = _options.DefaultResponse;
+                responseKind = DbChatMessageKind.ServiceResponse;
             }
 
             // costs
@@ -197,7 +213,7 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
                         response.Text = response.Text[..^markdownCostText.Length].Trim();
                     }
 
-                    await _storage.StoreMessageAsync(response, command.Self, cancellationToken);
+                    await _storage.StoreMessageAsync(response, command.Self, cancellationToken, responseKind);
                 }
             }
             catch (Exception ex)
@@ -228,7 +244,7 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
                     }
                 }
 
-                await _storage.StoreMessageAsync(response, command.Self, cancellationToken);
+                await _storage.StoreMessageAsync(response, command.Self, cancellationToken, responseKind);
             }
         }
         catch (Exception ex)
@@ -245,7 +261,7 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
                     MessageId = command.Message.MessageId
                 },
                 cancellationToken: cancellationToken);
-            await _storage.StoreMessageAsync(response, command.Self, cancellationToken);
+            await _storage.StoreMessageAsync(response, command.Self, cancellationToken, DbChatMessageKind.ServiceResponse);
         }
     }
 

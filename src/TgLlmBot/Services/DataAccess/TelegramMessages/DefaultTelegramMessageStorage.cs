@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Data;
 using System.Diagnostics.CodeAnalysis;
@@ -27,15 +27,17 @@ public class DefaultTelegramMessageStorage : ITelegramMessageStorage
     }
 
     [SuppressMessage("ReSharper", "ConvertToUsingDeclaration")]
-    public async Task StoreMessageAsync(Message message, User self, CancellationToken cancellationToken)
+    public async Task StoreMessageAsync(Message message, User self, CancellationToken cancellationToken, DbChatMessageKind? kind = null)
     {
+        ArgumentNullException.ThrowIfNull(message);
+        ArgumentNullException.ThrowIfNull(self);
         cancellationToken.ThrowIfCancellationRequested();
         await using (var asyncScope = _serviceScopeFactory.CreateAsyncScope())
         {
             var dbContext = asyncScope.ServiceProvider.GetRequiredService<BotDbContext>();
             await using (var transaction = await dbContext.Database.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken))
             {
-                var dbChatMessage = CreateDbChatMessage(message, self);
+                var dbChatMessage = CreateDbChatMessage(message, self, kind);
                 dbContext.ChatHistory.Add(dbChatMessage);
                 await dbContext.SaveChangesAsync(cancellationToken);
                 await transaction.CommitAsync(cancellationToken);
@@ -77,7 +79,8 @@ public class DefaultTelegramMessageStorage : ITelegramMessageStorage
                          "{nameof(DbChatMessage.FromLastName)}",
                          "{nameof(DbChatMessage.Text)}",
                          "{nameof(DbChatMessage.Caption)}",
-                         "{nameof(DbChatMessage.IsLlmReplyToMessage)}"
+                         "{nameof(DbChatMessage.IsLlmReplyToMessage)}",
+                         "{nameof(DbChatMessage.Kind)}"
                      FROM (
                               SELECT
                                   "{nameof(DbChatMessage.Id)}",
@@ -93,6 +96,7 @@ public class DefaultTelegramMessageStorage : ITelegramMessageStorage
                                   "{nameof(DbChatMessage.Text)}",
                                   "{nameof(DbChatMessage.Caption)}",
                                   "{nameof(DbChatMessage.IsLlmReplyToMessage)}",
+                                  "{nameof(DbChatMessage.Kind)}",
                                   SUM(COALESCE(LENGTH("{nameof(DbChatMessage.Text)}"), 0) + COALESCE(LENGTH("{nameof(DbChatMessage.Caption)}"), 0)) OVER (
                                       ORDER BY "{nameof(DbChatMessage.Date)}" DESC
                                       ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
@@ -101,6 +105,7 @@ public class DefaultTelegramMessageStorage : ITelegramMessageStorage
                               WHERE "{nameof(DbChatMessage.ChatId)}" = @{nameof(DbChatMessage.ChatId)}
                                 AND "{nameof(DbChatMessage.Date)}" <= (SELECT cutoff_date FROM target_message)
                                 AND "{nameof(DbChatMessage.MessageId)}" != @{nameof(DbChatMessage.MessageId)}
+                                AND ch."{nameof(DbChatMessage.Kind)}" IN (0, 1)
                                 AND NOT EXISTS (
                                      SELECT 1
                                      FROM public."{nameof(BotDbContext.KickedUsers)}" k
@@ -124,11 +129,15 @@ public class DefaultTelegramMessageStorage : ITelegramMessageStorage
         return resultAccumulator.ToArray();
     }
 
-    private static DbChatMessage CreateDbChatMessage(Message message, User self)
+    private static DbChatMessage CreateDbChatMessage(Message message, User self, DbChatMessageKind? kind)
     {
         ArgumentNullException.ThrowIfNull(message);
         ArgumentNullException.ThrowIfNull(self);
         var isSelfMessage = self.Id == message.From?.Id;
+        var messageKind = kind ?? (isSelfMessage
+            ? DbChatMessageKind.AssistantMessage
+            : DbChatMessageKind.UserMessage);
+        var isLlmReplyToMessage = messageKind == DbChatMessageKind.AssistantMessage;
         return new(
             message.Id,
             message.Chat.Id,
@@ -141,6 +150,7 @@ public class DefaultTelegramMessageStorage : ITelegramMessageStorage
             SurrogatePairSanitizer.SanitizeInvalidUtf16(message.From?.LastName),
             SurrogatePairSanitizer.SanitizeInvalidUtf16(message.Text),
             SurrogatePairSanitizer.SanitizeInvalidUtf16(message.Caption),
-            isSelfMessage);
+            isLlmReplyToMessage,
+            messageKind);
     }
 }

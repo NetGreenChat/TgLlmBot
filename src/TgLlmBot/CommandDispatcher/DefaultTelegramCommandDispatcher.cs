@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
@@ -21,6 +21,7 @@ using TgLlmBot.Commands.Usage;
 using TgLlmBot.Services.DataAccess.TelegramMessages;
 using TgLlmBot.Services.Telegram.SelfInformation;
 using RatingCommandHandler = TgLlmBot.Commands.Rating.RatingCommandHandler;
+using TgLlmBot.DataAccess.Models;
 
 namespace TgLlmBot.CommandDispatcher;
 
@@ -120,9 +121,25 @@ public class DefaultTelegramCommandDispatcher : ITelegramCommandDispatcher
         }
 
         var self = _self.GetSelf();
-        await _messageStorage.StoreMessageAsync(message, self, cancellationToken);
+        // await _messageStorage.StoreMessageAsync(message, self, cancellationToken);
         // ReSharper disable once ConditionalAccessQualifierIsNonNullableAccordingToAPIContract
         var rawPrompt = $"{message.Text?.Trim()?.ToLowerInvariant()}";
+        if (IsServiceCommand(rawPrompt))
+        {
+            await _messageStorage.StoreMessageAsync(
+                message,
+                self,
+                cancellationToken,
+                DbChatMessageKind.ServiceCommand);
+        }
+        else
+        {
+            await _messageStorage.StoreMessageAsync(
+                message,
+                self,
+                cancellationToken,
+                DbChatMessageKind.UserMessage);
+        }
         switch (rawPrompt)
         {
             case "!help":
@@ -223,5 +240,22 @@ public class DefaultTelegramCommandDispatcher : ITelegramCommandDispatcher
                 await _chatWithLlm.HandleAsync(command, cancellationToken);
             }
         }
+    }
+
+    private static bool IsServiceCommand(string rawPrompt)
+    {
+        return rawPrompt is "!help"
+            or "!ping"
+            or "!repo"
+            or "!model"
+            or "!usage"
+            or "!rating"
+            or "!chat_role_reset"
+            or "!personal_role_reset"
+            or "!personal_role_show"
+            or "!chat_role_show"
+            || rawPrompt.StartsWith("!chat_role", StringComparison.Ordinal)
+            || rawPrompt.StartsWith("!personal_role", StringComparison.Ordinal)
+            || rawPrompt.StartsWith("!set_limit", StringComparison.Ordinal);
     }
 }

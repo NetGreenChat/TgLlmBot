@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using System.Linq;
@@ -8,6 +8,7 @@ using Telegram.Bot;
 using Telegram.Bot.Types;
 using Telegram.Bot.Types.Enums;
 using TgLlmBot.CommandDispatcher.Abstractions;
+using TgLlmBot.DataAccess.Models;
 using TgLlmBot.Services.DataAccess.SystemPrompts;
 using TgLlmBot.Services.DataAccess.TelegramMessages;
 using TgLlmBot.Services.Resources;
@@ -59,7 +60,7 @@ public class SetChatSystemPromptCommandHandler : AbstractCommandHandler<SetChatS
                         MessageId = command.Message.MessageId
                     },
                     cancellationToken: cancellationToken);
-                await _storage.StoreMessageAsync(response, command.Self, cancellationToken);
+                await _storage.StoreMessageAsync(response, command.Self, cancellationToken, DbChatMessageKind.ServiceResponse);
             }
             else
             {
@@ -73,7 +74,7 @@ public class SetChatSystemPromptCommandHandler : AbstractCommandHandler<SetChatS
                         MessageId = command.Message.MessageId
                     },
                     cancellationToken: cancellationToken);
-                await _storage.StoreMessageAsync(response, command.Self, cancellationToken);
+                await _storage.StoreMessageAsync(response, command.Self, cancellationToken, DbChatMessageKind.ServiceResponse);
             }
         }
         catch (Exception ex)
@@ -87,7 +88,7 @@ public class SetChatSystemPromptCommandHandler : AbstractCommandHandler<SetChatS
                     MessageId = command.Message.MessageId
                 },
                 cancellationToken: cancellationToken);
-            await _storage.StoreMessageAsync(response, command.Self, cancellationToken);
+            await _storage.StoreMessageAsync(response, command.Self, cancellationToken, DbChatMessageKind.ServiceResponse);
         }
     }
 

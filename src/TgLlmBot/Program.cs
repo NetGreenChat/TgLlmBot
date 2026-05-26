@@ -21,6 +21,8 @@ using TgLlmBot.BackgroundServices;
 using TgLlmBot.CommandDispatcher;
 using TgLlmBot.Commands.ChatWithLlm;
 using TgLlmBot.Commands.ChatWithLlm.BackgroundServices.LlmRequests;
+using TgLlmBot.Commands.ChatWithLlm.Context;
+using TgLlmBot.Commands.ChatWithLlm.Context.Layers;
 using TgLlmBot.Commands.ChatWithLlm.Services;
 using TgLlmBot.Commands.DisplayHelp;
 using TgLlmBot.Commands.Model;
@@ -77,7 +79,7 @@ public partial class Program
             using (var host = builder.Build())
             {
                 await ApplyMigrationsAsync(host);
-                await InitializeMcpClientsAsync(host);
+                // await InitializeMcpClientsAsync(host);
                 var hostLoggerFactory = host.Services.GetRequiredService<ILoggerFactory>();
                 var logger = hostLoggerFactory.CreateLogger<Program>();
                 LogApplicationStarting(logger);
@@ -248,6 +250,14 @@ public partial class Program
         });
         // LLM Chat
         builder.Services.AddSingleton(new DefaultLlmChatHandlerOptions(config.Telegram.BotName, config.Llm.DefaultResponse));
+
+        builder.Services.AddSingleton<ILlmContextBuilder, DefaultLlmContextBuilder>();
+        builder.Services.AddSingleton<ILlmContextLayerProvider, CoreSystemPromptLayerProvider>();
+        builder.Services.AddSingleton<ILlmContextLayerProvider, ChatPromptLayerProvider>();
+        builder.Services.AddSingleton<ILlmContextLayerProvider, PersonalPromptLayerProvider>();
+        builder.Services.AddSingleton<ILlmContextLayerProvider, RecentHistoryLayerProvider>();
+        builder.Services.AddSingleton<ILlmContextLayerProvider, CurrentUserMessageLayerProvider>();
+
         builder.Services.AddSingleton<ILlmChatHandler, DefaultLlmChatHandler>();
         // DataAccess
         builder.Services.AddDbContext<BotDbContext>(dbContextOptions =>

@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.IO;
 using System.Linq;
 using System.Threading;
@@ -7,6 +7,7 @@ using Telegram.Bot;
 using Telegram.Bot.Types;
 using Telegram.Bot.Types.Enums;
 using TgLlmBot.CommandDispatcher.Abstractions;
+using TgLlmBot.DataAccess.Models;
 using TgLlmBot.Services.DataAccess.Limits;
 using TgLlmBot.Services.DataAccess.TelegramMessages;
 using TgLlmBot.Services.Resources;
@@ -88,7 +89,7 @@ public class SetLimitCommandHandler : AbstractCommandHandler<SetLimitCommand>
                 MessageId = command.Message.MessageId
             },
             cancellationToken: cancellationToken);
-        await _storage.StoreMessageAsync(response, command.Self, cancellationToken);
+        await _storage.StoreMessageAsync(response, command.Self, cancellationToken, DbChatMessageKind.ServiceResponse);
     }
 
     private async Task HandleNonAdminAsync(SetLimitCommand command, CancellationToken cancellationToken)
@@ -104,7 +105,7 @@ public class SetLimitCommandHandler : AbstractCommandHandler<SetLimitCommand>
                 MessageId = command.Message.MessageId
             },
             cancellationToken: cancellationToken);
-        await _storage.StoreMessageAsync(response, command.Self, cancellationToken);
+        await _storage.StoreMessageAsync(response, command.Self, cancellationToken, DbChatMessageKind.ServiceResponse);
     }
 
     private async Task<bool> IsAdminMessageAsync(SetLimitCommand command, CancellationToken cancellationToken)

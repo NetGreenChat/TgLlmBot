@@ -1,10 +1,11 @@
-﻿using System;
+using System;
 using System.Diagnostics.CodeAnalysis;
 using System.Threading;
 using System.Threading.Tasks;
 using Telegram.Bot;
 using Telegram.Bot.Types.Enums;
 using TgLlmBot.CommandDispatcher.Abstractions;
+using TgLlmBot.DataAccess.Models;
 using TgLlmBot.Services.DataAccess.SystemPrompts;
 using TgLlmBot.Services.DataAccess.TelegramMessages;
 
@@ -43,7 +44,7 @@ public class ResetPersonalSystemPromptCommandHandler : AbstractCommandHandler<Re
                     MessageId = command.Message.MessageId
                 },
                 cancellationToken: cancellationToken);
-            await _storage.StoreMessageAsync(response, command.Self, cancellationToken);
+            await _storage.StoreMessageAsync(response, command.Self, cancellationToken, DbChatMessageKind.ServiceResponse);
         }
         catch (Exception ex)
         {
@@ -56,7 +57,7 @@ public class ResetPersonalSystemPromptCommandHandler : AbstractCommandHandler<Re
                     MessageId = command.Message.MessageId
                 },
                 cancellationToken: cancellationToken);
-            await _storage.StoreMessageAsync(response, command.Self, cancellationToken);
+            await _storage.StoreMessageAsync(response, command.Self, cancellationToken, DbChatMessageKind.ServiceResponse);
         }
     }
 }

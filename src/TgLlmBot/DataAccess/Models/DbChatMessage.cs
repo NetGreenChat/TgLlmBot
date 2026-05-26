@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 
 namespace TgLlmBot.DataAccess.Models;
 
@@ -20,7 +20,8 @@ public class DbChatMessage
         string? fromLastName,
         string? text,
         string? caption,
-        bool isLlmReplyToMessage)
+        bool isLlmReplyToMessage,
+        DbChatMessageKind kind)
     {
         MessageId = messageId;
         ChatId = chatId;
@@ -34,6 +35,7 @@ public class DbChatMessage
         Text = text;
         Caption = caption;
         IsLlmReplyToMessage = isLlmReplyToMessage;
+        Kind = kind;
     }
 
     public Guid Id { get; set; }
@@ -49,4 +51,5 @@ public class DbChatMessage
     public string? Text { get; set; }
     public string? Caption { get; set; }
     public bool IsLlmReplyToMessage { get; set; }
+    public DbChatMessageKind Kind { get; set; }
 }

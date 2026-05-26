@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
 using TgLlmBot.DataAccess.Models;
@@ -19,6 +19,17 @@ public class DbChatMessageEntityTypeConfiguration : IEntityTypeConfiguration<DbC
         builder.Property(x => x.FromLastName).HasMaxLength(64);
         builder.Property(x => x.Text).HasMaxLength(4096);
         builder.Property(x => x.Caption).HasMaxLength(4096);
+        builder.Property(x => x.Kind)
+            .HasConversion<int>()
+            .HasDefaultValue(DbChatMessageKind.UserMessage);
+        builder.HasIndex(e => new
+        {
+            e.ChatId,
+            e.Kind,
+            e.Date
+        })
+            .HasDatabaseName("idx_chathistory_chatid_kind_date_desc")
+            .IsDescending(false, false, true);
 
         // Индекс для CTE target_message (MessageId, ChatId)
         builder.HasIndex(e => new
