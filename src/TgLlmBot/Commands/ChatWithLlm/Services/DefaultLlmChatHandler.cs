@@ -141,15 +141,14 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
             var tools = _tools.GetTools();
             var chatOptions = new ChatOptions
             {
-                //ConversationId = Guid.NewGuid().ToString("N"),
-                //Tools = [..tools],
-                //// Temperature = 0.8f,
-                //// TopK = 40,
-                //// TopP = 0.8f,
-                //AllowMultipleToolCalls = true,
-                //ToolMode = new AutoChatToolMode()
-
-                ConversationId = Guid.NewGuid().ToString("N")
+                ConversationId = Guid.NewGuid().ToString("N"),
+                Tools = [..tools],
+                // Temperature = 0.8f,
+                // TopK = 40,
+                // TopP = 0.8f,
+                MaxOutputTokens = 81920,
+                AllowMultipleToolCalls = true,
+                ToolMode = new AutoChatToolMode()
             };
             var llmResponse = await _chatClient.GetResponseAsync(context, chatOptions, cancellationToken);
             var rawLLmResponse = llmResponse.Text.Trim();
@@ -191,7 +190,7 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
                     {
                         response = await _bot.SendMessage(
                             command.Message.Chat,
-                            finalText[i],
+                            $"{finalText[i]}".Trim(),
                             ParseMode.MarkdownV2,
                             new()
                             {
@@ -203,7 +202,7 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
                     {
                         response = await _bot.SendMessage(
                             command.Message.Chat,
-                            finalText[i],
+                            $"{finalText[i]}".Trim(),
                             ParseMode.MarkdownV2,
                             cancellationToken: cancellationToken);
                     }
