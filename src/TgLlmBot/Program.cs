@@ -62,6 +62,8 @@ public partial class Program
 {
     private const string LlmHttpClient = "llm-http-client";
 
+    private static readonly TimeSpan LlmRequestTimeout = TimeSpan.FromSeconds(3600);
+
     [SuppressMessage("ReSharper", "ConvertToUsingDeclaration")]
     [SuppressMessage("Design", "CA1031:Do not catch general exception types")]
     public static async Task<int> Main(string[] args)
@@ -186,7 +188,7 @@ public partial class Program
         builder.Services.AddSingleton<ShowChatSystemPromptCommandHandler>();
         builder.Services.AddSingleton<SetLimitCommandHandler>();
         // Channel to communicate with LLM
-        var llmRequestChannel = Channel.CreateBounded<ChatWithLlmCommand>(new BoundedChannelOptions(20)
+        var llmRequestChannel = Channel.CreateBounded<ChatWithLlmCommand>(new BoundedChannelOptions(200)
         {
             FullMode = BoundedChannelFullMode.DropWrite,
             SingleReader = false,
@@ -208,7 +210,7 @@ public partial class Program
         // LLM
         builder.Services.AddSingleton<ICostContextStorage, DefaultCostContextStorage>();
         builder.Services.AddTransient<ModifyChatCompletionsRequestDelegatingHandler>();
-        builder.Services.AddHttpClient(LlmHttpClient)
+        builder.Services.AddHttpClient(LlmHttpClient, httpClient => httpClient.Timeout = LlmRequestTimeout)
             .AddHttpMessageHandler<ModifyChatCompletionsRequestDelegatingHandler>();
         builder.Services.AddSingleton(resolver =>
         {
@@ -220,6 +222,7 @@ public partial class Program
                 new()
                 {
                     Endpoint = config.Llm.Endpoint,
+                    NetworkTimeout = LlmRequestTimeout,
                     Transport = new HttpClientPipelineTransport(httpClient, true, loggerFactory)
                 });
         });
