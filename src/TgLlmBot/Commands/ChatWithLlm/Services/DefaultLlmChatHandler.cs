@@ -131,11 +131,6 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
             {
                 ConversationId = Guid.NewGuid().ToString("N"),
                 Tools = [..tools],
-                Temperature = 1.0f,
-                TopP = 0.8f,
-                TopK = 20,
-                PresencePenalty = 1.5f,
-
                 MaxOutputTokens = 81920,
                 AllowMultipleToolCalls = true,
                 ToolMode = new AutoChatToolMode()
