@@ -108,9 +108,9 @@ public class DefaultTelegramMessageStorage : ITelegramMessageStorage
                                        AND k."{nameof(DbKickedUser.UserId)}" = ch."{nameof(DbChatMessage.FromUserId)}"
                                 )
                               ORDER BY "{nameof(DbChatMessage.Date)}" DESC
-                              LIMIT 300
+                              LIMIT 200
                           ) as subquery
-                     WHERE cumulative_length <= 50000
+                     WHERE cumulative_length <= 30000
                      ORDER BY "{nameof(DbChatMessage.Date)}" DESC;
                      """,
                     messageId,
