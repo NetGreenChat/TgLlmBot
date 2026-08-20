@@ -3,6 +3,7 @@ using System.ClientModel;
 using System.ClientModel.Primitives;
 using System.Diagnostics.CodeAnalysis;
 using System.Net.Http;
+using System.Text;
 using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
@@ -70,6 +71,7 @@ public partial class Program
     public static async Task<int> Main(string[] args)
     {
         var exitCode = 0;
+        Console.OutputEncoding = Encoding.UTF8;
         try
         {
             var selfInfo = new DefaultTelegramSelfInformation();
