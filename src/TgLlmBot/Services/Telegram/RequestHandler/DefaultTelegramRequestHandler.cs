@@ -68,7 +68,29 @@ public sealed partial class DefaultTelegramRequestHandler : ITelegramRequestHand
         var isNewMessage = type == UpdateType.Message;
         var isChatAllowed = _options.AllowedChatIds.Contains(message.Chat.Id);
 
-        if (isMessageTooOld || !isNewMessage || !isChatAllowed)
+        if (!isChatAllowed)
+        {
+            // Старые сообщения не логируем: после рестарта Telegram переотдаёт накопившийся бэклог,
+            // и лог залило бы варнингами о давно случившихся попытках.
+            if (!isMessageTooOld && isNewMessage)
+            {
+                LogUnauthorizedChatAccess(
+                    _logger,
+                    message.Chat.Id,
+                    message.Chat.Type,
+                    message.Chat.Title,
+                    message.Chat.Username,
+                    message.From?.Id,
+                    message.From?.Username,
+                    message.From?.FirstName,
+                    message.From?.LastName,
+                    message.MessageId);
+            }
+
+            return;
+        }
+
+        if (isMessageTooOld || !isNewMessage)
         {
             return;
         }
@@ -113,6 +135,22 @@ public sealed partial class DefaultTelegramRequestHandler : ITelegramRequestHand
             await _kickedUsersStorage.RemoveKickedUserAsync(chatId, userId, cancellationToken);
         }
     }
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Unauthorized access: chat is not in the allow list. "
+                                                       + "ChatId: {ChatId}, ChatType: {ChatType}, ChatTitle: {ChatTitle}, ChatUsername: {ChatUsername}, "
+                                                       + "FromUserId: {FromUserId}, FromUsername: {FromUsername}, FromFirstName: {FromFirstName}, FromLastName: {FromLastName}, "
+                                                       + "MessageId: {MessageId}")]
+    private static partial void LogUnauthorizedChatAccess(
+        ILogger logger,
+        long chatId,
+        ChatType chatType,
+        string? chatTitle,
+        string? chatUsername,
+        long? fromUserId,
+        string? fromUsername,
+        string? fromFirstName,
+        string? fromLastName,
+        int messageId);
 
     [LoggerMessage(Level = LogLevel.Error, Message = "Telegram error handling. Error source: {ErrorSource}")]
     private static partial void LogErrorHandling(ILogger logger, HandleErrorSource errorSource, Exception exception);

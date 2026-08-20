@@ -18,7 +18,7 @@ using TgLlmBot.CommandDispatcher.Abstractions;
 using TgLlmBot.DataAccess.Models;
 using TgLlmBot.Services.DataAccess.Limits;
 using TgLlmBot.Services.DataAccess.TelegramMessages;
-using TgLlmBot.Services.OpenAIClient.Costs;
+using TgLlmBot.Services.Llm;
 using TgLlmBot.Services.Resources;
 using TgLlmBot.Services.Telegram.Markdown;
 using TgLlmBot.Services.Telegram.TypingStatus;
@@ -73,7 +73,6 @@ public class RatingCommandHandler : AbstractCommandHandler<RatingCommand>
 
     private readonly TelegramBotClient _bot;
     private readonly IChatClient _chatClient;
-    private readonly ICostContextStorage _costContextStorage;
     private readonly ILlmLimitsService _limits;
     private readonly RatingCommandHandlerOptions _options;
     private readonly ITelegramMessageStorage _storage;
@@ -85,7 +84,6 @@ public class RatingCommandHandler : AbstractCommandHandler<RatingCommand>
         RatingCommandHandlerOptions options,
         TelegramBotClient bot,
         IChatClient chatClient,
-        ICostContextStorage costContextStorage,
         ITelegramMessageStorage storage,
         ITelegramMarkdownConverter telegramMarkdownConverter,
         TimeProvider timeProvider,
@@ -95,7 +93,6 @@ public class RatingCommandHandler : AbstractCommandHandler<RatingCommand>
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(bot);
         ArgumentNullException.ThrowIfNull(chatClient);
-        ArgumentNullException.ThrowIfNull(costContextStorage);
         ArgumentNullException.ThrowIfNull(storage);
         ArgumentNullException.ThrowIfNull(telegramMarkdownConverter);
         ArgumentNullException.ThrowIfNull(timeProvider);
@@ -104,7 +101,6 @@ public class RatingCommandHandler : AbstractCommandHandler<RatingCommand>
         _options = options;
         _bot = bot;
         _chatClient = chatClient;
-        _costContextStorage = costContextStorage;
         _storage = storage;
         _telegramMarkdownConverter = telegramMarkdownConverter;
         _timeProvider = timeProvider;
@@ -120,7 +116,6 @@ public class RatingCommandHandler : AbstractCommandHandler<RatingCommand>
         ArgumentNullException.ThrowIfNull(command);
         try
         {
-            _costContextStorage.Initialize();
             _typingStatusService.StartTyping(command.Message.Chat.Id);
             if (command.Message.From?.Id is not null)
             {
@@ -159,7 +154,8 @@ public class RatingCommandHandler : AbstractCommandHandler<RatingCommand>
                 Temperature = 0.3f,
                 AllowMultipleToolCalls = false,
                 ToolMode = new NoneChatToolMode(),
-                ResponseFormat = responseFormat
+                ResponseFormat = responseFormat,
+                RawRepresentationFactory = static _ => LlmRawRequestFactory.CreateChatCompletionOptions()
             };
             var llmResponse = await _chatClient.GetResponseAsync(context, chatOptions, cancellationToken);
             // ReSharper disable once ConditionalAccessQualifierIsNonNullableAccordingToAPIContract
@@ -202,22 +198,7 @@ public class RatingCommandHandler : AbstractCommandHandler<RatingCommand>
 
     private async Task RespondWithMarkdownAsync(RatingCommand command, string text, CancellationToken cancellationToken)
     {
-        var costInUsd = 0m;
-        if (_costContextStorage.TryGetCost(out var cost))
-        {
-            costInUsd = cost.Value;
-        }
-
-        var costTextPresent = false;
-        var costText = $"[Cost: {costInUsd} USD]";
-        var responseText = text;
-        if (costInUsd > 0m)
-        {
-            responseText += $"\n\n{costText}";
-            costTextPresent = true;
-        }
-
-        var telegramMarkdown = _telegramMarkdownConverter.ConvertToSolidTelegramMarkdown(responseText);
+        var telegramMarkdown = _telegramMarkdownConverter.ConvertToSolidTelegramMarkdown(text);
         var response = await _bot.SendMessage(
             command.Message.Chat,
             telegramMarkdown,
@@ -227,14 +208,6 @@ public class RatingCommandHandler : AbstractCommandHandler<RatingCommand>
                 MessageId = command.Message.MessageId
             },
             cancellationToken: cancellationToken);
-        if (!string.IsNullOrEmpty(response.Text))
-        {
-            if (costTextPresent)
-            {
-                response.Text = response.Text[..^costText.Length].Trim();
-            }
-        }
-
         await _storage.StoreMessageAsync(response, command.Self, cancellationToken);
     }
 

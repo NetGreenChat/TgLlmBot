@@ -19,8 +19,8 @@ using TgLlmBot.DataAccess.Models;
 using TgLlmBot.Services.DataAccess.Limits;
 using TgLlmBot.Services.DataAccess.SystemPrompts;
 using TgLlmBot.Services.DataAccess.TelegramMessages;
+using TgLlmBot.Services.Llm;
 using TgLlmBot.Services.Mcp.Tools;
-using TgLlmBot.Services.OpenAIClient.Costs;
 using TgLlmBot.Services.Resources;
 using TgLlmBot.Services.Telegram.Markdown;
 using TgLlmBot.Services.Telegram.TypingStatus;
@@ -41,7 +41,6 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
 
     private readonly TelegramBotClient _bot;
     private readonly IChatClient _chatClient;
-    private readonly ICostContextStorage _costContextStorage;
     private readonly ILlmLimitsService _limits;
     private readonly ILogger<DefaultLlmChatHandler> _logger;
     private readonly DefaultLlmChatHandlerOptions _options;
@@ -61,7 +60,6 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
         ITelegramMarkdownConverter telegramMarkdownConverter,
         ITelegramMessageStorage storage,
         IMcpToolsProvider tools,
-        ICostContextStorage costContextStorage,
         ITypingStatusService typingStatusService,
         ILlmLimitsService limits,
         ILogger<DefaultLlmChatHandler> logger)
@@ -74,7 +72,6 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
         ArgumentNullException.ThrowIfNull(telegramMarkdownConverter);
         ArgumentNullException.ThrowIfNull(storage);
         ArgumentNullException.ThrowIfNull(tools);
-        ArgumentNullException.ThrowIfNull(costContextStorage);
         ArgumentNullException.ThrowIfNull(typingStatusService);
         ArgumentNullException.ThrowIfNull(limits);
         ArgumentNullException.ThrowIfNull(logger);
@@ -86,7 +83,6 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
         _telegramMarkdownConverter = telegramMarkdownConverter;
         _storage = storage;
         _tools = tools;
-        _costContextStorage = costContextStorage;
         _typingStatusService = typingStatusService;
         _limits = limits;
         _logger = logger;
@@ -99,7 +95,6 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
         try
         {
             Log.ProcessingLlmRequest(_logger, command.Message.From?.Username, command.Message.From?.Id);
-            _costContextStorage.Initialize();
             _typingStatusService.StartTyping(command.Message.Chat.Id);
             if (command.Message.From?.Id is not null)
             {
@@ -133,7 +128,8 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
                 Tools = [..tools],
                 MaxOutputTokens = 81920,
                 AllowMultipleToolCalls = true,
-                ToolMode = new AutoChatToolMode()
+                ToolMode = new AutoChatToolMode(),
+                RawRepresentationFactory = static _ => LlmRawRequestFactory.CreateChatCompletionOptions()
             };
             var llmResponse = await _chatClient.GetResponseAsync(context, chatOptions, cancellationToken);
             var rawLLmResponse = llmResponse.Text.Trim();
@@ -143,31 +139,14 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
                 llmResponseText = _options.DefaultResponse;
             }
 
-            // costs
-            var costInUsd = 0m;
-            if (_costContextStorage.TryGetCost(out var cost))
-            {
-                costInUsd = cost.Value;
-            }
-
-            var costTextPresent = false;
-            var rawCostText = $"[Cost: {costInUsd} USD]";
-            var markdownCostText = _telegramMarkdownConverter.ConvertToSolidTelegramMarkdown(rawCostText);
             try
             {
                 var finalText = _telegramMarkdownConverter.ConvertToPartedTelegramMarkdown(llmResponseText, 2000);
-                if (costInUsd > 0m)
-                {
-                    finalText[^1] += $"\n\n{markdownCostText}";
-                    costTextPresent = true;
-                }
-
                 _typingStatusService.StopTyping(command.Message.Chat.Id);
                 for (var i = 0; i < finalText.Length; i++)
                 {
                     await Task.Delay(1000, cancellationToken);
                     var firstPart = i == 0;
-                    var lastPart = i == finalText.Length - 1;
                     Message response;
                     if (firstPart)
                     {
@@ -190,11 +169,6 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
                             cancellationToken: cancellationToken);
                     }
 
-                    if (!string.IsNullOrEmpty(response.Text) && costTextPresent && lastPart)
-                    {
-                        response.Text = response.Text[..^markdownCostText.Length].Trim();
-                    }
-
                     await _storage.StoreMessageAsync(response, command.Self, cancellationToken);
                 }
             }
@@ -202,30 +176,15 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
             {
                 Log.MarkdownConversionOrSendFailed(_logger, ex);
                 _typingStatusService.StopTyping(command.Message.Chat.Id);
-                var finalText = llmResponseText;
-                if (costInUsd > 0m)
-                {
-                    finalText += $"\n\n{rawCostText}";
-                    costTextPresent = true;
-                }
-
                 var response = await _bot.SendMessage(
                     command.Message.Chat,
-                    finalText,
+                    llmResponseText,
                     ParseMode.None,
                     new()
                     {
                         MessageId = command.Message.MessageId
                     },
                     cancellationToken: cancellationToken);
-                if (!string.IsNullOrEmpty(response.Text))
-                {
-                    if (costTextPresent)
-                    {
-                        response.Text = response.Text[..^rawCostText.Length].Trim();
-                    }
-                }
-
                 await _storage.StoreMessageAsync(response, command.Self, cancellationToken);
             }
         }

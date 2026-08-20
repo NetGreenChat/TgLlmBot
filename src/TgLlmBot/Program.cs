@@ -21,6 +21,7 @@ using TgLlmBot.BackgroundServices;
 using TgLlmBot.CommandDispatcher;
 using TgLlmBot.Commands.ChatWithLlm;
 using TgLlmBot.Commands.ChatWithLlm.BackgroundServices.LlmRequests;
+using TgLlmBot.Commands.ChatWithLlm.Queues;
 using TgLlmBot.Commands.ChatWithLlm.Services;
 using TgLlmBot.Commands.DisplayHelp;
 using TgLlmBot.Commands.Model;
@@ -47,8 +48,6 @@ using TgLlmBot.Services.DataAccess.TelegramMessages;
 using TgLlmBot.Services.Mcp.Clients.Github;
 using TgLlmBot.Services.Mcp.Enums;
 using TgLlmBot.Services.Mcp.Tools;
-using TgLlmBot.Services.OpenAIClient.Costs;
-using TgLlmBot.Services.OpenAIClient.HttpClient.DelegatingHandlers;
 using TgLlmBot.Services.OpenRouter;
 using TgLlmBot.Services.Telegram.Markdown;
 using TgLlmBot.Services.Telegram.RequestHandler;
@@ -61,6 +60,8 @@ namespace TgLlmBot;
 public partial class Program
 {
     private const string LlmHttpClient = "llm-http-client";
+
+    private const int LlmRequestQueueCapacityPerChat = 200;
 
     private static readonly TimeSpan LlmRequestTimeout = TimeSpan.FromSeconds(3600);
 
@@ -187,31 +188,26 @@ public partial class Program
         builder.Services.AddSingleton<ShowPersonalSystemPromptCommandHandler>();
         builder.Services.AddSingleton<ShowChatSystemPromptCommandHandler>();
         builder.Services.AddSingleton<SetLimitCommandHandler>();
-        // Channel to communicate with LLM
-        var llmRequestChannel = Channel.CreateBounded<ChatWithLlmCommand>(new BoundedChannelOptions(200)
+        // Separate LLM request queue per allowed chat, so different chats are processed in parallel
+        builder.Services.AddSingleton(new DefaultLlmRequestQueuesOptions(
+            config.Telegram.AllowedChatIds,
+            LlmRequestQueueCapacityPerChat));
+        builder.Services.AddSingleton<ILlmRequestQueues>(resolver =>
         {
-            FullMode = BoundedChannelFullMode.DropWrite,
-            SingleReader = false,
-            SingleWriter = false,
-            AllowSynchronousContinuations = false
-        });
-        builder.Services.AddSingleton<ChannelWriter<ChatWithLlmCommand>>(resolver =>
-        {
+            var queuesOptions = resolver.GetRequiredService<DefaultLlmRequestQueuesOptions>();
+            var queuesLogger = resolver.GetRequiredService<ILogger<DefaultLlmRequestQueues>>();
+            var queues = new DefaultLlmRequestQueues(queuesOptions, queuesLogger);
             var hostLifetime = resolver.GetRequiredService<IHostApplicationLifetime>();
-            hostLifetime.ApplicationStopping.Register(() => llmRequestChannel.Writer.Complete());
-            return llmRequestChannel.Writer;
+            hostLifetime.ApplicationStopping.Register(queues.Complete);
+            return queues;
         });
-        builder.Services.AddSingleton(llmRequestChannel.Reader);
         // Background services
         builder.Services.AddHostedService<LlmRequestsBackgroundService>();
         builder.Services.AddHostedService<CleanupOldMessagesBackgroundService>();
         builder.Services.AddHostedService<TypingStatusBackgroundService>();
 
         // LLM
-        builder.Services.AddSingleton<ICostContextStorage, DefaultCostContextStorage>();
-        builder.Services.AddTransient<ModifyChatCompletionsRequestDelegatingHandler>();
-        builder.Services.AddHttpClient(LlmHttpClient, httpClient => httpClient.Timeout = LlmRequestTimeout)
-            .AddHttpMessageHandler<ModifyChatCompletionsRequestDelegatingHandler>();
+        builder.Services.AddHttpClient(LlmHttpClient, httpClient => httpClient.Timeout = LlmRequestTimeout);
         builder.Services.AddSingleton(resolver =>
         {
             var httpClientFactory = resolver.GetRequiredService<IHttpClientFactory>();
