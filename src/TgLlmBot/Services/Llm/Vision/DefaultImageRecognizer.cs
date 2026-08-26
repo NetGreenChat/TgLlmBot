@@ -19,7 +19,7 @@ namespace TgLlmBot.Services.Llm.Vision;
 /// </remarks>
 public partial class DefaultImageRecognizer : IImageRecognizer
 {
-    private const int MaxOutputTokens = 4096;
+    private const int MaxOutputTokens = 65536;
 
     private const string SystemPrompt = """
                                         Ты - система компьютерного зрения. Твоя задача - максимально подробно и точно описать изображение на русском языке.
