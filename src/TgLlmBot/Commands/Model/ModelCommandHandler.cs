@@ -22,7 +22,7 @@ public class ModelCommandHandler : AbstractCommandHandler<ModelCommand>
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(bot);
         ArgumentNullException.ThrowIfNull(markdownConverter);
-        _response = BuildResponseTemplate(markdownConverter, options.Model, options.Endpoint);
+        _response = BuildResponseTemplate(markdownConverter, options);
         _bot = bot;
     }
 
@@ -41,12 +41,14 @@ public class ModelCommandHandler : AbstractCommandHandler<ModelCommand>
             cancellationToken: cancellationToken);
     }
 
-    private static string BuildResponseTemplate(ITelegramMarkdownConverter markdownConverter, string model, Uri endpoint)
+    private static string BuildResponseTemplate(ITelegramMarkdownConverter markdownConverter, ModelCommandHandlerOptions options)
     {
-        var baseUri = GetBaseUrl(endpoint);
         var builder = new StringBuilder();
-        builder.Append("Провайдер: `").Append(baseUri).AppendLine("`");
-        builder.Append("Модель: `").Append(model).AppendLine("`");
+        builder.Append("Провайдер: `").Append(GetBaseUrl(options.Endpoint)).AppendLine("`");
+        builder.Append("Модель: `").Append(options.Model).AppendLine("`");
+        builder.AppendLine();
+        builder.Append("Провайдер (распознавание изображений): `").Append(GetBaseUrl(options.VisionEndpoint)).AppendLine("`");
+        builder.Append("Модель (распознавание изображений): `").Append(options.VisionModel).AppendLine("`");
         var rawMarkdown = builder.ToString();
         var optimizedMarkdown = markdownConverter.ConvertToSolidTelegramMarkdown(rawMarkdown);
         return optimizedMarkdown;

@@ -26,4 +26,21 @@ public static class LlmRawRequestFactory
 #pragma warning restore SCME0001
         return options;
     }
+
+    /// <summary>
+    ///     Создаёт сырые опции запроса к vision-модели, распознающей изображения.
+    /// </summary>
+    /// <remarks>
+    ///     Рассуждения выключены: описание картинки нужно целиком, а не в виде обрубленного
+    ///     по лимиту токенов внутреннего монолога модели.
+    ///     Как и <see cref="CreateChatCompletionOptions" />, возвращает НОВЫЙ экземпляр на каждый вызов.
+    /// </remarks>
+    public static ChatCompletionOptions CreateVisionChatCompletionOptions()
+    {
+        var options = new ChatCompletionOptions();
+#pragma warning disable SCME0001 // JsonPatch is for evaluation purposes only and is subject to change
+        options.Patch.Set("$.chat_template_kwargs.enable_thinking"u8, false);
+#pragma warning restore SCME0001
+        return options;
+    }
 }

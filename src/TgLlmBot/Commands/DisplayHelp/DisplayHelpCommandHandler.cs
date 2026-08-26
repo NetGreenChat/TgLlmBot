@@ -49,6 +49,9 @@ public class DisplayHelpCommandHandler : AbstractCommandHandler<DisplayHelpComma
         builder.AppendLine("Например:");
         builder.Append('`').Append(botName).Append(" напиши Hello World на C#").Append('`').AppendLine();
         builder.AppendLine();
+        builder.Append("Картинки бот тоже понимает: пришли изображение с подписью, начинающейся с `").Append(botName)
+            .AppendLine("`, или ответь такой подписью на сообщение с картинкой");
+        builder.AppendLine();
         builder.AppendLine();
         builder.AppendLine("Список команд:");
         builder.AppendLine();

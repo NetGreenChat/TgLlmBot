@@ -1,8 +1,8 @@
-﻿using System.ComponentModel.DataAnnotations;
+using System.ComponentModel.DataAnnotations;
 
 namespace TgLlmBot.Configuration.Options.Llm;
 
-public class LlmOptions
+public class LlmVisionOptions
 {
     [Required]
     [MaxLength(10000)]
@@ -16,11 +16,4 @@ public class LlmOptions
     [Required]
     [MaxLength(10000)]
     public string Model { get; set; } = default!;
-
-    [Required]
-    [MaxLength(10000)]
-    public string DefaultResponse { get; set; } = default!;
-
-    [Required]
-    public LlmVisionOptions Vision { get; set; } = default!;
 }

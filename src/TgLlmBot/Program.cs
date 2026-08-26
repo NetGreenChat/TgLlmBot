@@ -46,6 +46,7 @@ using TgLlmBot.Services.DataAccess.KickedUsers;
 using TgLlmBot.Services.DataAccess.Limits;
 using TgLlmBot.Services.DataAccess.SystemPrompts;
 using TgLlmBot.Services.DataAccess.TelegramMessages;
+using TgLlmBot.Services.Llm.Vision;
 using TgLlmBot.Services.Mcp.Clients.Github;
 using TgLlmBot.Services.Mcp.Enums;
 using TgLlmBot.Services.Mcp.Tools;
@@ -62,9 +63,15 @@ public partial class Program
 {
     private const string LlmHttpClient = "llm-http-client";
 
+    private const string LlmVisionHttpClient = "llm-vision-http-client";
+
+    private const string LlmVisionClientKey = "llm-vision";
+
     private const int LlmRequestQueueCapacityPerChat = 200;
 
     private static readonly TimeSpan LlmRequestTimeout = TimeSpan.FromSeconds(3600);
+
+    private static readonly TimeSpan LlmVisionRequestTimeout = TimeSpan.FromSeconds(300);
 
     [SuppressMessage("ReSharper", "ConvertToUsingDeclaration")]
     [SuppressMessage("Design", "CA1031:Do not catch general exception types")]
@@ -176,7 +183,11 @@ public partial class Program
         builder.Services.AddSingleton(new DisplayHelpCommandHandlerOptions(config.Telegram.BotName));
         builder.Services.AddSingleton<DisplayHelpCommandHandler>();
         builder.Services.AddSingleton<ChatWithLlmCommandHandler>();
-        builder.Services.AddSingleton(new ModelCommandHandlerOptions(config.Llm.Endpoint, config.Llm.Model));
+        builder.Services.AddSingleton(new ModelCommandHandlerOptions(
+            config.Llm.Endpoint,
+            config.Llm.Model,
+            config.Llm.Vision.Endpoint,
+            config.Llm.Vision.Model));
         builder.Services.AddSingleton<ModelCommandHandler>();
         builder.Services.AddSingleton<PingCommandHandler>();
         builder.Services.AddSingleton<RepoCommandHandler>();
@@ -238,6 +249,39 @@ public partial class Program
                 .UseLogging(loggerFactory)
                 .UseFunctionInvocation()
                 .Build();
+        });
+        // LLM - Vision (отдельный инстанс с мультимодальной моделью, распознающей изображения)
+        builder.Services.AddHttpClient(LlmVisionHttpClient, httpClient => httpClient.Timeout = LlmVisionRequestTimeout);
+        builder.Services.AddKeyedSingleton<OpenAIClient>(LlmVisionClientKey, (resolver, _) =>
+        {
+            var httpClientFactory = resolver.GetRequiredService<IHttpClientFactory>();
+            var loggerFactory = resolver.GetRequiredService<ILoggerFactory>();
+            var httpClient = httpClientFactory.CreateClient(LlmVisionHttpClient);
+            return new OpenAIClient(
+                new ApiKeyCredential(config.Llm.Vision.ApiKey),
+                new()
+                {
+                    Endpoint = config.Llm.Vision.Endpoint,
+                    NetworkTimeout = LlmVisionRequestTimeout,
+                    Transport = new HttpClientPipelineTransport(httpClient, true, loggerFactory)
+                });
+        });
+        builder.Services.AddKeyedSingleton<IChatClient>(LlmVisionClientKey, (resolver, serviceKey) =>
+        {
+            var openAiClient = resolver.GetRequiredKeyedService<OpenAIClient>(serviceKey);
+            var loggerFactory = resolver.GetRequiredService<ILoggerFactory>();
+            // Инструменты vision-модели не отдаём: она только описывает картинку, вызывать MCP - работа основной модели.
+            return openAiClient.GetChatClient(config.Llm.Vision.Model)
+                .AsIChatClient()
+                .AsBuilder()
+                .UseLogging(loggerFactory)
+                .Build();
+        });
+        builder.Services.AddSingleton<IImageRecognizer>(resolver =>
+        {
+            var visionChatClient = resolver.GetRequiredKeyedService<IChatClient>(LlmVisionClientKey);
+            var recognizerLogger = resolver.GetRequiredService<ILogger<DefaultImageRecognizer>>();
+            return new DefaultImageRecognizer(visionChatClient, recognizerLogger);
         });
         // LLM Chat
         builder.Services.AddSingleton(new DefaultLlmChatHandlerOptions(config.Telegram.BotName, config.Llm.DefaultResponse));

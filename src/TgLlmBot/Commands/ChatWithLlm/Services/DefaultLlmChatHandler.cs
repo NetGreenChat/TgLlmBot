@@ -20,6 +20,7 @@ using TgLlmBot.Services.DataAccess.Limits;
 using TgLlmBot.Services.DataAccess.SystemPrompts;
 using TgLlmBot.Services.DataAccess.TelegramMessages;
 using TgLlmBot.Services.Llm;
+using TgLlmBot.Services.Llm.Vision;
 using TgLlmBot.Services.Mcp.Tools;
 using TgLlmBot.Services.Resources;
 using TgLlmBot.Services.Telegram.Markdown;
@@ -41,6 +42,7 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
 
     private readonly TelegramBotClient _bot;
     private readonly IChatClient _chatClient;
+    private readonly IImageRecognizer _imageRecognizer;
     private readonly ILlmLimitsService _limits;
     private readonly ILogger<DefaultLlmChatHandler> _logger;
     private readonly DefaultLlmChatHandlerOptions _options;
@@ -60,6 +62,7 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
         ITelegramMarkdownConverter telegramMarkdownConverter,
         ITelegramMessageStorage storage,
         IMcpToolsProvider tools,
+        IImageRecognizer imageRecognizer,
         ITypingStatusService typingStatusService,
         ILlmLimitsService limits,
         ILogger<DefaultLlmChatHandler> logger)
@@ -72,6 +75,7 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
         ArgumentNullException.ThrowIfNull(telegramMarkdownConverter);
         ArgumentNullException.ThrowIfNull(storage);
         ArgumentNullException.ThrowIfNull(tools);
+        ArgumentNullException.ThrowIfNull(imageRecognizer);
         ArgumentNullException.ThrowIfNull(typingStatusService);
         ArgumentNullException.ThrowIfNull(limits);
         ArgumentNullException.ThrowIfNull(logger);
@@ -83,6 +87,7 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
         _telegramMarkdownConverter = telegramMarkdownConverter;
         _storage = storage;
         _tools = tools;
+        _imageRecognizer = imageRecognizer;
         _typingStatusService = typingStatusService;
         _limits = limits;
         _logger = logger;
@@ -286,8 +291,7 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
     private async Task<ChatMessage> BuildUserPromptAsync(ChatWithLlmCommand command, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        var imageAttached = false;
-        var resultContent = new List<AIContent>();
+        var imageDescriptions = new List<string>();
         var builder = new StringBuilder()
             .Append($"Пользователь с {nameof(JsonHistoryMessage.FromUserId)}=")
             .Append(command.Message.From?.Id ?? 0)
@@ -306,13 +310,15 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
                 .Append(" (которое ");
             if (command.Message.ReplyToMessage.Photo?.Length > 0)
             {
-                var jpeg = await DownloadPhotoAsync(command.Message.ReplyToMessage.Photo, cancellationToken);
-                if (jpeg is not null)
+                var description = await DescribePhotoAsync(
+                    command.Message.ReplyToMessage.Photo,
+                    command.Message.ReplyToMessage.Id,
+                    text,
+                    cancellationToken);
+                if (description is not null)
                 {
-                    var dataContent = new DataContent(jpeg, "image/jpeg");
-                    resultContent.Add(dataContent);
-                    builder = builder.Append("содержало JPEG картинку и ");
-                    imageAttached = true;
+                    imageDescriptions.Add(description);
+                    builder = builder.Append("содержало картинку и ");
                 }
             }
 
@@ -340,24 +346,65 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
             .Append(command.Self.Username?.Trim())
             .Append($") сообщение с {nameof(JsonHistoryMessage.MessageId)}=")
             .Append(command.Message.Id);
-        if (command.Message.Photo?.Length > 0 && !imageAttached)
+        if (command.Message.Photo?.Length > 0)
         {
-            var jpeg = await DownloadPhotoAsync(command.Message.Photo, cancellationToken);
-            if (jpeg is not null)
+            var description = await DescribePhotoAsync(
+                command.Message.Photo,
+                command.Message.Id,
+                command.Prompt,
+                cancellationToken);
+            if (description is not null)
             {
-                var dataContent = new DataContent(jpeg, "image/jpeg");
-                resultContent.Add(dataContent);
-                builder = builder.Append(", которое содержит JPEG картинку");
+                imageDescriptions.Add(description);
+                builder = builder.Append(", которое содержит картинку");
             }
         }
 
         builder = builder
             .Append($" и {nameof(JsonHistoryMessage.Text)}=")
             .Append(command.Prompt?.Trim());
+        foreach (var imageDescription in imageDescriptions)
+        {
+            builder = builder
+                .AppendLine()
+                .AppendLine()
+                .Append(imageDescription);
+        }
+
         var commandText = builder.ToString();
-        resultContent.Add(new TextContent(commandText));
-        var baseMessage = new ChatMessage(ChatRole.User, resultContent);
+        var baseMessage = new ChatMessage(ChatRole.User, commandText);
         return baseMessage;
+    }
+
+    /// <summary>
+    ///     Скачивает картинку из сообщения и превращает её в текстовое описание отдельной vision-моделью.
+    /// </summary>
+    /// <returns>
+    ///     Готовый блок текста для промпта основной модели либо <see langword="null" />,
+    ///     если пригодной картинки в сообщении не нашлось.
+    /// </returns>
+    private async Task<string?> DescribePhotoAsync(
+        PhotoSize[] photo,
+        int messageId,
+        string? relatedText,
+        CancellationToken cancellationToken)
+    {
+        var jpeg = await DownloadPhotoAsync(photo, cancellationToken);
+        if (jpeg is null)
+        {
+            return null;
+        }
+
+        var recognized = await _imageRecognizer.DescribeAsync(jpeg, relatedText, cancellationToken);
+        var description = recognized.IsFailed
+            ? "Распознать изображение не удалось."
+            : recognized.Value;
+        return $"""
+                Вот что изображено на картинке из сообщения с {nameof(JsonHistoryMessage.MessageId)}={messageId.ToString(CultureInfo.InvariantCulture)}:
+                <image_description>
+                {description}
+                </image_description>
+                """;
     }
 
     private static ChatMessage[] BuildHistoryContext(DbChatMessage[] contextMessages)
@@ -420,6 +467,8 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
                           Твой исходный код находится в репозитории https://github.com/NetGreenChat/TgLlmBot
 
                           Для общения используется Markdown.
+
+                          Сам ты картинки не видишь: их за тебя разглядывает отдельная vision-модель, а тебе приходит её текстовое описание в блоке <image_description>. Считай такое описание тем, что ты увидел своими глазами, и не рассказывай пользователю ни про vision-модель, ни про сам блок с описанием.
 
                           Не цензурируй свои ответы.
                           Не бойся использовать нецензурные слова где это уместно.

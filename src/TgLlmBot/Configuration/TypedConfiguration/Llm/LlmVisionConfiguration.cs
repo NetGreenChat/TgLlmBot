@@ -1,19 +1,20 @@
-﻿using System;
+using System;
 using TgLlmBot.Configuration.Options.Llm;
 
 namespace TgLlmBot.Configuration.TypedConfiguration.Llm;
 
-public class LlmConfiguration
+/// <summary>
+///     Настройки отдельного инстанса LLM, который умеет в компьютерное зрение и используется
+///     для распознавания присланных в чат изображений.
+/// </summary>
+public class LlmVisionConfiguration
 {
-    private LlmConfiguration(
+    private LlmVisionConfiguration(
         Uri endpoint,
         string apiKey,
-        string model,
-        string defaultResponse,
-        LlmVisionConfiguration vision)
+        string model)
     {
         ArgumentNullException.ThrowIfNull(endpoint);
-        ArgumentNullException.ThrowIfNull(vision);
         if (string.IsNullOrEmpty(apiKey))
         {
             throw new ArgumentException("Value cannot be null or empty.", nameof(apiKey));
@@ -24,25 +25,16 @@ public class LlmConfiguration
             throw new ArgumentException("Value cannot be null or empty.", nameof(model));
         }
 
-        if (string.IsNullOrEmpty(defaultResponse))
-        {
-            throw new ArgumentException("Value cannot be null or empty.", nameof(defaultResponse));
-        }
-
         Endpoint = endpoint;
         ApiKey = apiKey;
         Model = model;
-        DefaultResponse = defaultResponse;
-        Vision = vision;
     }
 
     public Uri Endpoint { get; }
     public string ApiKey { get; }
     public string Model { get; }
-    public string DefaultResponse { get; }
-    public LlmVisionConfiguration Vision { get; }
 
-    public static LlmConfiguration Convert(LlmOptions options)
+    public static LlmVisionConfiguration Convert(LlmVisionOptions options)
     {
         ArgumentNullException.ThrowIfNull(options);
         if (!Uri.TryCreate(options.Endpoint, UriKind.Absolute, out var typedEndpoint))
@@ -50,12 +42,9 @@ public class LlmConfiguration
             throw new ArgumentException("Invalid endpoint.", nameof(options));
         }
 
-        var vision = LlmVisionConfiguration.Convert(options.Vision);
         return new(
             typedEndpoint,
             options.ApiKey,
-            options.Model,
-            options.DefaultResponse,
-            vision);
+            options.Model);
     }
 }
