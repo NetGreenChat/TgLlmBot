@@ -1,5 +1,13 @@
-﻿namespace TgLlmBot.Services.Telegram.TypingStatus;
+namespace TgLlmBot.Services.Telegram.TypingStatus;
 
-public record StartTypingCommand(long ChatId);
-
-public record StopTypingCommand(long ChatId);
+/// <summary>
+///     Просьба включить или выключить статус "печатает" в чате.
+/// </summary>
+/// <remarks>
+///     Включение и выключение ездят одной командой по одному каналу намеренно. Пока это были два
+///     канала с двумя независимыми циклами чтения, порядка между ними не было никакого: стоп,
+///     обогнавший свой старт, отменял пустоту, а пришедший следом старт включал печать навсегда.
+///     На последовательности "медиа-пайплайн отпечатал - передал эстафету обработчику ответа"
+///     это ловилось на каждом втором чате.
+/// </remarks>
+public record TypingCommand(long ChatId, bool IsTyping);

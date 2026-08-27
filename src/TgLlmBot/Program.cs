@@ -390,36 +390,23 @@ public partial class Program
         // OpenRouter stats
         builder.Services.AddSingleton(new DefaultOpenRouterKeyUsageProviderOptions(config.Llm.ApiKey));
         builder.Services.AddHttpClient<IOpenRouterKeyUsageProvider, DefaultOpenRouterKeyUsageProvider>();
-        // Channel to send typing status to chats
-        var startTypingStatusChannel = Channel.CreateBounded<StartTypingCommand>(new BoundedChannelOptions(20)
+        // Channel to drive typing status in chats
+        // Без потолка намеренно: команды крошечные, а потерянная "перестань печатать"
+        // оставляет чат печатающим до перезапуска бота. Один канал на оба вида команд -
+        // чтобы стоп не мог обогнать свой старт.
+        var typingStatusChannel = Channel.CreateUnbounded<TypingCommand>(new UnboundedChannelOptions
         {
-            FullMode = BoundedChannelFullMode.DropWrite,
-            SingleReader = false,
+            SingleReader = true,
             SingleWriter = false,
             AllowSynchronousContinuations = false
         });
-        builder.Services.AddSingleton<ChannelWriter<StartTypingCommand>>(resolver =>
+        builder.Services.AddSingleton<ChannelWriter<TypingCommand>>(resolver =>
         {
             var hostLifetime = resolver.GetRequiredService<IHostApplicationLifetime>();
-            hostLifetime.ApplicationStopping.Register(() => startTypingStatusChannel.Writer.Complete());
-            return startTypingStatusChannel.Writer;
+            hostLifetime.ApplicationStopping.Register(() => typingStatusChannel.Writer.Complete());
+            return typingStatusChannel.Writer;
         });
-        builder.Services.AddSingleton(startTypingStatusChannel.Reader);
-        // Channel to stop sending typing status to chats
-        var stopSendingTypingStatusChannel = Channel.CreateBounded<StopTypingCommand>(new BoundedChannelOptions(20)
-        {
-            FullMode = BoundedChannelFullMode.DropWrite,
-            SingleReader = false,
-            SingleWriter = false,
-            AllowSynchronousContinuations = false
-        });
-        builder.Services.AddSingleton<ChannelWriter<StopTypingCommand>>(resolver =>
-        {
-            var hostLifetime = resolver.GetRequiredService<IHostApplicationLifetime>();
-            hostLifetime.ApplicationStopping.Register(() => stopSendingTypingStatusChannel.Writer.Complete());
-            return stopSendingTypingStatusChannel.Writer;
-        });
-        builder.Services.AddSingleton(stopSendingTypingStatusChannel.Reader);
+        builder.Services.AddSingleton(typingStatusChannel.Reader);
         // Typing sender service
         builder.Services.AddSingleton<ITypingStatusService, TypingStatusService>();
         return builder;

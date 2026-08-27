@@ -1,30 +1,27 @@
-﻿using System;
+using System;
 using System.Threading.Channels;
 
 namespace TgLlmBot.Services.Telegram.TypingStatus;
 
 public class TypingStatusService : ITypingStatusService
 {
-    private readonly ChannelWriter<StartTypingCommand> _startTypingCommandWriter;
-    private readonly ChannelWriter<StopTypingCommand> _stopTypingCommandWriter;
+    private readonly ChannelWriter<TypingCommand> _typingCommandWriter;
 
-    public TypingStatusService(
-        ChannelWriter<StartTypingCommand> startTypingCommandWriter,
-        ChannelWriter<StopTypingCommand> stopTypingCommandWriter)
+    public TypingStatusService(ChannelWriter<TypingCommand> typingCommandWriter)
     {
-        ArgumentNullException.ThrowIfNull(startTypingCommandWriter);
-        ArgumentNullException.ThrowIfNull(stopTypingCommandWriter);
-        _startTypingCommandWriter = startTypingCommandWriter;
-        _stopTypingCommandWriter = stopTypingCommandWriter;
+        ArgumentNullException.ThrowIfNull(typingCommandWriter);
+        _typingCommandWriter = typingCommandWriter;
     }
 
     public void StartTyping(long chatId)
     {
-        _startTypingCommandWriter.TryWrite(new(chatId));
+        _typingCommandWriter.TryWrite(new(chatId, true));
     }
 
     public void StopTyping(long chatId)
     {
-        _stopTypingCommandWriter.TryWrite(new(chatId));
+        // Канал без потолка, поэтому запись не отвергается: потерянная команда "перестань печатать"
+        // оставила бы чат печатающим до перезапуска бота
+        _typingCommandWriter.TryWrite(new(chatId, false));
     }
 }

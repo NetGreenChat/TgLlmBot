@@ -136,6 +136,9 @@ public partial class DefaultTelegramCommandDispatcher : ITelegramCommandDispatch
 
         if (!AllowedMessageTypes.Contains(message.Type))
         {
+            // Единственное место, где сообщение исчезает бесследно. Без этой строчки
+            // "бот не видит такие-то вложения" не отличить от проблемы дальше по пути
+            Log.MessageTypeNotSupported(_logger, message.Type, message.Chat.Id, message.MessageId);
             return;
         }
 
@@ -363,5 +366,8 @@ public partial class DefaultTelegramCommandDispatcher : ITelegramCommandDispatch
     {
         [LoggerMessage(Level = LogLevel.Warning, Message = "Media recognition queue rejected attachments of message {MessageId} in chat {ChatId}")]
         public static partial void MediaNotEnqueued(ILogger logger, long chatId, int messageId);
+
+        [LoggerMessage(Level = LogLevel.Debug, Message = "Skipped message {MessageId} in chat {ChatId}: {MessageType} is not a supported message type")]
+        public static partial void MessageTypeNotSupported(ILogger logger, MessageType messageType, long chatId, int messageId);
     }
 }
