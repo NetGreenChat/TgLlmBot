@@ -20,6 +20,7 @@ using TgLlmBot.Commands.SetPersonalSystemPrompt;
 using TgLlmBot.Commands.ShowChatSystemPrompt;
 using TgLlmBot.Commands.ShowPersonalSystemPrompt;
 using TgLlmBot.Commands.Usage;
+using TgLlmBot.DataAccess.Models;
 using TgLlmBot.Services.DataAccess.TelegramMessages;
 using TgLlmBot.Services.Media;
 using TgLlmBot.Services.Telegram.SelfInformation;
@@ -152,11 +153,20 @@ public partial class DefaultTelegramCommandDispatcher : ITelegramCommandDispatch
 
         if (!isBotOwnMessage)
         {
-            if (chatWithLlmCommand is not null && hasSupportedMedia)
+            // Разглядеть до ответа надо не только свои вложения: "что тут на картинке" спрашивают
+            // чаще всего реплаем на чужое сообщение. У такого вопроса своих вложений нет, а чужое
+            // стоит в очереди как обычная история - без этой ветки бот ответил бы "не разглядел",
+            // потому что ждать распознавания обработчик ответа не умеет
+            var needsRecognition = hasSupportedMedia
+                || (chatWithLlmCommand is not null
+                    && await HasUnrecognizedReplyMediaAsync(message, storedMessage.ChatId, cancellationToken));
+
+            if (chatWithLlmCommand is not null && needsRecognition)
             {
-                // Сообщение адресовано боту и несёт картинки: ответ пойдёт только после распознавания
-                // и компактинга, поэтому дальше обрабатываем в медиа-пайплайне, а команду в LLM-очередь
-                // поставит воркер. Постановка во фронт блокирующая: дропать ответ недопустимо.
+                // Сообщение адресовано боту и завязано на картинки - свои или те, на которые оно
+                // отвечает: ответ пойдёт только после распознавания и компактинга, поэтому дальше
+                // обрабатываем в медиа-пайплайне, а команду в LLM-очередь поставит воркер.
+                // Постановка во фронт блокирующая: дропать ответ недопустимо.
                 var job = new MediaRecognitionJob(
                     message,
                     storedMessage,
@@ -279,6 +289,41 @@ public partial class DefaultTelegramCommandDispatcher : ITelegramCommandDispatch
         {
             await _chatWithLlm.HandleAsync(chatWithLlmCommand, cancellationToken);
         }
+    }
+
+    /// <summary>
+    ///     Проверяет, есть ли у сообщения, на которое сделан реплай, вложения, которые ещё не разглядели.
+    /// </summary>
+    /// <remarks>
+    ///     Вопрос о чужой картинке должен подождать её распознавания, а вопрос о картинке разобранной
+    ///     (или о тексте) - уйти в LLM-очередь сразу, без лишнего круга через медиа-пайплайн.
+    /// </remarks>
+    private async Task<bool> HasUnrecognizedReplyMediaAsync(Message message, long chatId, CancellationToken cancellationToken)
+    {
+        var replyToMessage = message.ReplyToMessage;
+        if (replyToMessage is null)
+        {
+            return false;
+        }
+
+        // Сначала по самому апдейту, без похода в базу: реплаем отвечают в основном на текст,
+        // и гонять из-за этого запрос на каждое сообщение незачем
+        if (!TelegramMessageMediaExtractor.Extract(replyToMessage).Any(static m => !string.IsNullOrEmpty(m.DownloadFileId)))
+        {
+            return false;
+        }
+
+        var rows = string.IsNullOrEmpty(replyToMessage.MediaGroupId)
+            ? await SelectSingleAsync(chatId, replyToMessage.Id, cancellationToken)
+            : await _messageStorage.SelectMediaGroupMessagesAsync(chatId, replyToMessage.MediaGroupId, cancellationToken);
+        return rows.Any(static row => row.Media.Any(static media =>
+            media.Status is DbMediaRecognitionStatus.Pending && !string.IsNullOrEmpty(media.DownloadFileId)));
+    }
+
+    private async Task<DbChatMessage[]> SelectSingleAsync(long chatId, int messageId, CancellationToken cancellationToken)
+    {
+        var row = await _messageStorage.SelectMessageAsync(chatId, messageId, cancellationToken);
+        return row is null ? [] : [row];
     }
 
     /// <summary>

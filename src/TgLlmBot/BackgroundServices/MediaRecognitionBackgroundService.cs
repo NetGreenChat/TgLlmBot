@@ -251,14 +251,14 @@ public partial class MediaRecognitionBackgroundService : BackgroundService
             var changedMedia = new List<DbChatMessageMedia>();
 
             // Фаза 1: распознавание. Подробные описания - только в памяти воркера
-            foreach (var (message, media) in mediaItems)
+            foreach (var (message, media, relatedText) in mediaItems)
             {
                 if (media.Status is not DbMediaRecognitionStatus.Pending)
                 {
                     continue;
                 }
 
-                var description = await RecognizeAsync(media, job.RelatedText, cancellationToken);
+                var description = await RecognizeAsync(media, relatedText, cancellationToken);
                 if (description is null)
                 {
                     // Распознать не удалось: фиксируем состояние в базе, иначе подчистка
@@ -271,7 +271,7 @@ public partial class MediaRecognitionBackgroundService : BackgroundService
             }
 
             // Фаза 2: компактинг. Каждое вложение ужимается с историей до своего сообщения
-            foreach (var (message, media) in mediaItems)
+            foreach (var (message, media, relatedText) in mediaItems)
             {
                 if (!fullDescriptions.TryGetValue(media.Id, out var fullDescription))
                 {
@@ -288,7 +288,7 @@ public partial class MediaRecognitionBackgroundService : BackgroundService
                     fullDescription,
                     media.Kind,
                     media.IsAnimated,
-                    job.RelatedText,
+                    relatedText,
                     historyJson);
                 var compressed = await _compressor.CompressAsync(request, cancellationToken);
 
@@ -337,15 +337,19 @@ public partial class MediaRecognitionBackgroundService : BackgroundService
 
     /// <summary>
     ///     Собирает вложения логического сообщения: для требующего ответа задания с альбомом - вложения
-    ///     всех частей альбома в порядке отправки, иначе - вложения одного сообщения.
+    ///     всех частей альбома в порядке отправки, иначе - вложения одного сообщения. Для требующего
+    ///     ответа задания к набору добавляются вложения сообщения, на которое сделан реплай.
     /// </summary>
     /// <remarks>
     ///     Пачку картинок Telegram разбирает на отдельные сообщения, поэтому фронтовое задание сначала
     ///     ждёт, пока приедет весь альбом, а затем обрабатывает его целиком. Задания истории каждой
     ///     части обрабатывают только свою часть: если её уже разобрало фронтовое задание, вложения
     ///     будут в состоянии <see cref="DbMediaRecognitionStatus.Ready" /> и задание станет no-op.
+    ///     Реплай подтягивается потому, что спросить "что на картинке" чаще всего приходят именно
+    ///     реплаем на чужое сообщение: своих вложений у вопроса нет, а описать надо чужое, и к моменту
+    ///     ответа оно должно быть готово - ждать обработчик ответа не умеет.
     /// </remarks>
-    private async Task<List<(DbChatMessage Message, DbChatMessageMedia Media)>> CollectMediaAsync(
+    private async Task<List<(DbChatMessage Message, DbChatMessageMedia Media, string? RelatedText)>> CollectMediaAsync(
         MediaRecognitionJob job,
         CancellationToken cancellationToken)
     {
@@ -354,13 +358,13 @@ public partial class MediaRecognitionBackgroundService : BackgroundService
         var isAlbum = !string.IsNullOrEmpty(mediaGroupId);
 
         DbChatMessage[] rows;
-        if (isAlbum && job.RequiresResponse)
+        if (isAlbum)
         {
-            await _mediaGroupTracker.WaitForSettleAsync(chatId, mediaGroupId!, cancellationToken);
-            rows = await _storage.SelectMediaGroupMessagesAsync(chatId, mediaGroupId!, cancellationToken);
-        }
-        else if (isAlbum)
-        {
+            if (job.RequiresResponse)
+            {
+                await _mediaGroupTracker.WaitForSettleAsync(chatId, mediaGroupId!, cancellationToken);
+            }
+
             rows = await _storage.SelectMediaGroupMessagesAsync(chatId, mediaGroupId!, cancellationToken);
         }
         else
@@ -369,16 +373,64 @@ public partial class MediaRecognitionBackgroundService : BackgroundService
             rows = row is null ? [] : [row];
         }
 
-        var result = new List<(DbChatMessage, DbChatMessageMedia)>();
+        var result = new List<(DbChatMessage, DbChatMessageMedia, string?)>();
+        var seenMedia = new HashSet<Guid>();
+
+        // Подпись у альбома лежит на одной части, а относится ко всем, поэтому у частей без
+        // своего текста подставляется текст задания
         foreach (var row in rows)
         {
-            foreach (var media in row.Media.OrderBy(x => x.Order))
+            AppendMedia(result, seenMedia, row, (row.Caption ?? row.Text) ?? job.RelatedText);
+        }
+
+        if (job.RequiresResponse && job.StoredMessage.ReplyToMessageId is { } replyToMessageId)
+        {
+            // Текст вопроса к чужой картинке не подставляем: сжатое описание останется в истории
+            // навсегда, и вопрос в нём будет только мешать - картинка пришла в чат не с ним
+            foreach (var row in await SelectWithAlbumAsync(chatId, replyToMessageId, cancellationToken))
             {
-                result.Add((row, media));
+                AppendMedia(result, seenMedia, row, row.Caption ?? row.Text);
             }
         }
 
         return result;
+    }
+
+    private static void AppendMedia(
+        List<(DbChatMessage, DbChatMessageMedia, string?)> result,
+        HashSet<Guid> seenMedia,
+        DbChatMessage row,
+        string? relatedText)
+    {
+        foreach (var media in row.Media.OrderBy(x => x.Order))
+        {
+            // Реплай может указывать на часть того же альбома, который задание и так разбирает:
+            // разглядывать и ужимать одно вложение дважды незачем
+            if (seenMedia.Add(media.Id))
+            {
+                result.Add((row, media, relatedText));
+            }
+        }
+    }
+
+    /// <summary>
+    ///     Возвращает сообщение вместе с остальными частями его альбома, если оно частью альбома было.
+    /// </summary>
+    private async Task<DbChatMessage[]> SelectWithAlbumAsync(long chatId, int messageId, CancellationToken cancellationToken)
+    {
+        var row = await _storage.SelectMessageAsync(chatId, messageId, cancellationToken);
+        if (row is null)
+        {
+            return [];
+        }
+
+        if (string.IsNullOrEmpty(row.MediaGroupId))
+        {
+            return [row];
+        }
+
+        var parts = await _storage.SelectMediaGroupMessagesAsync(chatId, row.MediaGroupId, cancellationToken);
+        return parts.Length > 0 ? parts : [row];
     }
 
     /// <summary>
