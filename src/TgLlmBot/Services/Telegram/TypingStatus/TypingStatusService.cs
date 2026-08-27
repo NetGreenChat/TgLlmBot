@@ -1,27 +1,44 @@
 using System;
-using System.Threading.Channels;
+using Microsoft.Extensions.Logging;
 
 namespace TgLlmBot.Services.Telegram.TypingStatus;
 
-public class TypingStatusService : ITypingStatusService
+public partial class TypingStatusService : ITypingStatusService
 {
-    private readonly ChannelWriter<TypingCommand> _typingCommandWriter;
+    private readonly ILogger<TypingStatusService> _logger;
+    private readonly ITypingStatusQueues _queues;
 
-    public TypingStatusService(ChannelWriter<TypingCommand> typingCommandWriter)
+    public TypingStatusService(ITypingStatusQueues queues, ILogger<TypingStatusService> logger)
     {
-        ArgumentNullException.ThrowIfNull(typingCommandWriter);
-        _typingCommandWriter = typingCommandWriter;
+        ArgumentNullException.ThrowIfNull(queues);
+        ArgumentNullException.ThrowIfNull(logger);
+        _queues = queues;
+        _logger = logger;
     }
 
     public void StartTyping(long chatId)
     {
-        _typingCommandWriter.TryWrite(new(chatId, true));
+        Enqueue(chatId, true);
     }
 
     public void StopTyping(long chatId)
     {
-        // Канал без потолка, поэтому запись не отвергается: потерянная команда "перестань печатать"
-        // оставила бы чат печатающим до перезапуска бота
-        _typingCommandWriter.TryWrite(new(chatId, false));
+        Enqueue(chatId, false);
+    }
+
+    private void Enqueue(long chatId, bool isTyping)
+    {
+        if (!_queues.TryEnqueue(chatId, new(chatId, isTyping)))
+        {
+            // Очереди без потолка, так что сюда попадает только чат без очереди или остановка
+            // приложения. Молча терять именно выключение нельзя: чат останется печатать
+            Log.CommandNotEnqueued(_logger, chatId, isTyping);
+        }
+    }
+
+    private static partial class Log
+    {
+        [LoggerMessage(Level = LogLevel.Warning, Message = "There is no active typing status queue for chat {ChatId}, typing={IsTyping} skipped")]
+        public static partial void CommandNotEnqueued(ILogger logger, long chatId, bool isTyping);
     }
 }

@@ -390,23 +390,17 @@ public partial class Program
         // OpenRouter stats
         builder.Services.AddSingleton(new DefaultOpenRouterKeyUsageProviderOptions(config.Llm.ApiKey));
         builder.Services.AddHttpClient<IOpenRouterKeyUsageProvider, DefaultOpenRouterKeyUsageProvider>();
-        // Channel to drive typing status in chats
-        // Без потолка намеренно: команды крошечные, а потерянная "перестань печатать"
-        // оставляет чат печатающим до перезапуска бота. Один канал на оба вида команд -
-        // чтобы стоп не мог обогнать свой старт.
-        var typingStatusChannel = Channel.CreateUnbounded<TypingCommand>(new UnboundedChannelOptions
+        // Separate typing status queue per allowed chat, so a slow cancellation in one chat
+        // never holds up the others
+        builder.Services.AddSingleton(new DefaultTypingStatusQueuesOptions(config.Telegram.AllowedChatIds));
+        builder.Services.AddSingleton<ITypingStatusQueues>(resolver =>
         {
-            SingleReader = true,
-            SingleWriter = false,
-            AllowSynchronousContinuations = false
-        });
-        builder.Services.AddSingleton<ChannelWriter<TypingCommand>>(resolver =>
-        {
+            var queuesOptions = resolver.GetRequiredService<DefaultTypingStatusQueuesOptions>();
+            var queues = new DefaultTypingStatusQueues(queuesOptions);
             var hostLifetime = resolver.GetRequiredService<IHostApplicationLifetime>();
-            hostLifetime.ApplicationStopping.Register(() => typingStatusChannel.Writer.Complete());
-            return typingStatusChannel.Writer;
+            hostLifetime.ApplicationStopping.Register(queues.Complete);
+            return queues;
         });
-        builder.Services.AddSingleton(typingStatusChannel.Reader);
         // Typing sender service
         builder.Services.AddSingleton<ITypingStatusService, TypingStatusService>();
         return builder;

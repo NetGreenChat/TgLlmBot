@@ -1,5 +1,4 @@
 using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.Threading;
@@ -17,47 +16,97 @@ namespace TgLlmBot.BackgroundServices;
 ///     Держит статус "печатает" в чатах, пока его просят держать.
 /// </summary>
 /// <remarks>
-///     Команды разбираются одним циклом в порядке поступления. Это существенно: включение и
-///     выключение приходят парами, и стоило им разъехаться по разным очередям, как стоп начинал
-///     обгонять свой старт - чат оставался печатающим навсегда.
+///     У каждого чата свой воркер и своя очередь команд. Внутри чата команды разбираются строго
+///     по порядку: включение и выключение приходят парами, и стоило им разъехаться, как стоп
+///     начинал обгонять свой старт - чат оставался печатающим навсегда. Между чатами общего нет
+///     ничего: ни очереди, ни состояния, ни ожиданий, поэтому долгая отмена в одном чате
+///     не задерживает остальные.
 /// </remarks>
 public partial class TypingStatusBackgroundService : BackgroundService
 {
     private const int TypingIntervalMs = 4_000;
 
-    private readonly ConcurrentDictionary<long, CancellationTokenSource> _activeTypingTimersCts = new();
     private readonly TelegramBotClient _bot;
     private readonly ILogger<TypingStatusBackgroundService> _logger;
-
-    private readonly ChannelReader<TypingCommand> _typingChannelReader;
+    private readonly ITypingStatusQueues _queues;
 
     public TypingStatusBackgroundService(
-        ChannelReader<TypingCommand> typingChannelReader,
+        ITypingStatusQueues queues,
         TelegramBotClient bot,
         ILogger<TypingStatusBackgroundService> logger)
     {
-        ArgumentNullException.ThrowIfNull(typingChannelReader);
+        ArgumentNullException.ThrowIfNull(queues);
         ArgumentNullException.ThrowIfNull(bot);
         ArgumentNullException.ThrowIfNull(logger);
-        _typingChannelReader = typingChannelReader;
+        _queues = queues;
         _bot = bot;
         _logger = logger;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        LogTypingStatusWorkerStarted();
+        var readers = _queues.Readers;
+        LogTypingStatusWorkerStarted(readers.Count);
         try
         {
-            await foreach (var cmd in _typingChannelReader.ReadAllAsync(stoppingToken))
+            var workers = new List<Task>(readers.Count);
+            foreach (var (chatId, reader) in readers)
             {
-                if (cmd.IsTyping)
+                // stoppingToken намеренно не передаётся в Task.Run - воркер сам обрабатывает отмену внутри
+                workers.Add(Task.Run(() => ProcessChatQueueAsync(chatId, reader, stoppingToken), CancellationToken.None));
+            }
+
+            await Task.WhenAll(workers);
+        }
+        finally
+        {
+            LogTypingStatusWorkerStopped();
+        }
+    }
+
+    /// <remarks>
+    ///     Состояние печати чата живёт здесь, в локальных переменных воркера, и больше нигде:
+    ///     трогать его может только этот цикл, поэтому ни словаря, ни блокировок не нужно.
+    /// </remarks>
+    [SuppressMessage("Reliability", "CA2025:Ensure tasks using 'IDisposable' instances complete before the instances are disposed")]
+    [SuppressMessage("Reliability", "CA2000:Dispose objects before losing scope")]
+    private async Task ProcessChatQueueAsync(
+        long chatId,
+        ChannelReader<TypingCommand> reader,
+        CancellationToken stoppingToken)
+    {
+        CancellationTokenSource? cts = null;
+        Task? typing = null;
+        try
+        {
+            await foreach (var command in reader.ReadAllAsync(stoppingToken))
+            {
+                // Цикл печати мог выйти сам - например, бота выгнали из чата и статус больше
+                // некуда слать. Подчищаем, иначе чат так и числился бы печатающим
+                if (typing is { IsCompleted: true })
                 {
-                    StartTyping(cmd.ChatId, stoppingToken);
+                    await StopTypingAsync(cts!, typing);
+                    cts = null;
+                    typing = null;
                 }
-                else
+
+                if (command.IsTyping)
                 {
-                    await StopTypingAsync(cmd.ChatId);
+                    if (typing is not null)
+                    {
+                        // Уже печатаем - второй таймер ни к чему
+                        continue;
+                    }
+
+                    cts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+                    typing = RunTypingAsync(chatId, cts.Token);
+                }
+                else if (typing is not null)
+                {
+                    await StopTypingAsync(cts!, typing);
+                    cts = null;
+                    typing = null;
+                    LogRemovedTypingState(chatId);
                 }
             }
         }
@@ -65,49 +114,35 @@ public partial class TypingStatusBackgroundService : BackgroundService
         {
             // graceful shutdown
         }
-
-        LogTypingStatusWorkerStopped();
+        finally
+        {
+            if (typing is not null)
+            {
+                await StopTypingAsync(cts!, typing);
+            }
+        }
     }
 
+    /// <summary>
+    ///     Гасит цикл печати и дожидается его выхода, прежде чем освободить его токен.
+    /// </summary>
     /// <remarks>
-    ///     CTS переходит во владение запущенного цикла печати: он же его и освобождает, когда
-    ///     выходит. Дождаться цикла здесь нельзя - он живёт ровно столько, сколько чат печатает.
+    ///     Ожидание здесь принципиально: освободить CTS раньше, чем цикл его отпустил, - значит
+    ///     получить <see cref="ObjectDisposedException" /> из его же await. Ждём только свой чат.
     /// </remarks>
-    [SuppressMessage("Reliability", "CA2025:Ensure tasks using 'IDisposable' instances complete before the instances are disposed")]
-    private void StartTyping(long chatId, CancellationToken stoppingToken)
+    private static async Task StopTypingAsync(CancellationTokenSource cts, Task typing)
     {
-        var cts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
-        if (!_activeTypingTimersCts.TryAdd(chatId, cts))
-        {
-            // В чате уже печатаем - второй таймер ни к чему
-            cts.Dispose();
-            return;
-        }
-
-        _ = RunTypingAsync(chatId, cts);
-    }
-
-    /// <remarks>
-    ///     CTS здесь только отменяется: освобождает его цикл печати, которому отменённый токен
-    ///     нужен ещё какое-то время, чтобы досмотреть отмену и выйти.
-    /// </remarks>
-    [SuppressMessage("Reliability", "CA2000:Dispose objects before losing scope")]
-    private async Task StopTypingAsync(long chatId)
-    {
-        if (_activeTypingTimersCts.TryRemove(chatId, out var cts))
-        {
-            // Освобождает CTS сам цикл печати: пока он не вышел, отменённый токен ему ещё нужен
-            await cts.CancelAsync();
-            LogRemovedTypingState(chatId);
-        }
+        await cts.CancelAsync();
+        // RunTypingAsync не выпускает исключений наружу, так что ожидание безопасно
+        await typing;
+        cts.Dispose();
     }
 
     [SuppressMessage("Design", "CA1031:Do not catch general exception types")]
-    private async Task RunTypingAsync(long chatId, CancellationTokenSource cts)
+    private async Task RunTypingAsync(long chatId, CancellationToken ct)
     {
         LogTypingActionStarted(chatId);
 
-        var ct = cts.Token;
         try
         {
             using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(TypingIntervalMs));
@@ -126,13 +161,6 @@ public partial class TypingStatusBackgroundService : BackgroundService
         {
             LogFailedToSendChatActionToChat(chatId, ex);
         }
-        finally
-        {
-            // Убираем именно свою запись: пока мы досматривали отмену, чат мог начать печатать
-            // заново, и снести чужой, ещё живой таймер нельзя
-            _activeTypingTimersCts.TryRemove(new KeyValuePair<long, CancellationTokenSource>(chatId, cts));
-            cts.Dispose();
-        }
     }
 
     private async Task SendTypingRequest(long chatId, CancellationToken ct)
@@ -141,8 +169,8 @@ public partial class TypingStatusBackgroundService : BackgroundService
         LogTypingActionSent(chatId);
     }
 
-    [LoggerMessage(LogLevel.Information, "Typing Service Started")]
-    partial void LogTypingStatusWorkerStarted();
+    [LoggerMessage(LogLevel.Information, "Typing Service Started with {ChatsCount} per-chat queues")]
+    partial void LogTypingStatusWorkerStarted(int chatsCount);
 
     [LoggerMessage(LogLevel.Information, "Typing Service Stopped")]
     partial void LogTypingStatusWorkerStopped();
