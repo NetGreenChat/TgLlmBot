@@ -19,6 +19,7 @@ public class DbChatMessageEntityTypeConfiguration : IEntityTypeConfiguration<DbC
         builder.Property(x => x.FromLastName).HasMaxLength(64);
         builder.Property(x => x.Text).HasMaxLength(4096);
         builder.Property(x => x.Caption).HasMaxLength(4096);
+        builder.Property(x => x.MediaGroupId).HasMaxLength(64);
 
         // Индекс для CTE target_message (MessageId, ChatId)
         builder.HasIndex(e => new
@@ -46,5 +47,14 @@ public class DbChatMessageEntityTypeConfiguration : IEntityTypeConfiguration<DbC
             })
             .HasDatabaseName("idx_chathistory_chatid_messageid_date")
             .IsDescending(false, false, true); // ChatId ASC, MessageId ASC, Date DESC
+
+        // Сборка альбома обратно в одно логическое сообщение
+        builder.HasIndex(e => new
+            {
+                e.ChatId,
+                e.MediaGroupId
+            })
+            .HasDatabaseName("idx_chathistory_chatid_mediagroupid")
+            .HasFilter("\"MediaGroupId\" IS NOT NULL");
     }
 }

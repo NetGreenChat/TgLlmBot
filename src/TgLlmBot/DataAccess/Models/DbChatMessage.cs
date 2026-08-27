@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 
 namespace TgLlmBot.DataAccess.Models;
 
@@ -20,7 +21,8 @@ public class DbChatMessage
         string? fromLastName,
         string? text,
         string? caption,
-        bool isLlmReplyToMessage)
+        bool isLlmReplyToMessage,
+        string? mediaGroupId)
     {
         MessageId = messageId;
         ChatId = chatId;
@@ -34,6 +36,7 @@ public class DbChatMessage
         Text = text;
         Caption = caption;
         IsLlmReplyToMessage = isLlmReplyToMessage;
+        MediaGroupId = mediaGroupId;
     }
 
     public Guid Id { get; set; }
@@ -49,4 +52,16 @@ public class DbChatMessage
     public string? Text { get; set; }
     public string? Caption { get; set; }
     public bool IsLlmReplyToMessage { get; set; }
+
+    /// <summary>
+    ///     Идентификатор альбома Telegram. Картинки, отправленные одной пачкой, приходят
+    ///     отдельными сообщениями с общим значением этого поля - по нему они собираются обратно.
+    /// </summary>
+    public string? MediaGroupId { get; set; }
+
+    /// <summary>
+    ///     Вложения сообщения, упорядоченные по <see cref="DbChatMessageMedia.Order" />.
+    ///     Удаляются вместе с сообщением каскадом на стороне базы.
+    /// </summary>
+    public ICollection<DbChatMessageMedia> Media { get; } = new List<DbChatMessageMedia>();
 }

@@ -13,16 +13,22 @@ namespace TgLlmBot.BackgroundServices;
 
 public partial class CleanupOldMessagesBackgroundService : BackgroundService
 {
+    private static readonly TimeSpan MediaDescriptionRetention = TimeSpan.FromDays(180);
+
     private readonly ILogger<CleanupOldMessagesBackgroundService> _logger;
     private readonly IServiceScopeFactory _serviceScopeFactory;
+    private readonly TimeProvider _timeProvider;
 
     public CleanupOldMessagesBackgroundService(
         IServiceScopeFactory serviceScopeFactory,
+        TimeProvider timeProvider,
         ILogger<CleanupOldMessagesBackgroundService> logger)
     {
         ArgumentNullException.ThrowIfNull(serviceScopeFactory);
+        ArgumentNullException.ThrowIfNull(timeProvider);
         ArgumentNullException.ThrowIfNull(logger);
         _serviceScopeFactory = serviceScopeFactory;
+        _timeProvider = timeProvider;
         _logger = logger;
     }
 
@@ -40,6 +46,7 @@ public partial class CleanupOldMessagesBackgroundService : BackgroundService
                 {
                     var dbContext = asyncScope.ServiceProvider.GetRequiredService<BotDbContext>();
                     await CleanupOldMessagesAsync(dbContext, stoppingToken);
+                    await CleanupOldMediaDescriptionsAsync(dbContext, stoppingToken);
                 }
 
                 LogIterationComplete();
@@ -81,7 +88,9 @@ public partial class CleanupOldMessagesBackgroundService : BackgroundService
 
             if (cutoffDate != default)
             {
-                // Удаляем все сообщения старше этой даты для данного чата
+                // Удаляем все сообщения старше этой даты для данного чата.
+                // Массовое удаление идёт мимо сущностей, поэтому вложения подчищает
+                // каскад внешнего ключа на стороне базы, а не EF
                 var removedMessages = await dbContext.ChatHistory
                     .AsNoTracking()
                     .Where(x => x.ChatId == chatId && x.Date < cutoffDate)
@@ -96,8 +105,29 @@ public partial class CleanupOldMessagesBackgroundService : BackgroundService
         }
     }
 
+    /// <summary>
+    ///     Чистит кэш описаний вложений от давно не встречавшихся файлов.
+    /// </summary>
+    /// <remarks>
+    ///     Кэш ключуется идентификатором файла в Telegram и сам по себе не ограничен ничем.
+    ///     Полгода - запас с большим избытком: мем или стикер, не появлявшийся столько времени,
+    ///     дешевле описать заново, чем хранить вечно.
+    /// </remarks>
+    private async Task CleanupOldMediaDescriptionsAsync(BotDbContext dbContext, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var cutoffDate = _timeProvider.GetUtcNow().UtcDateTime - MediaDescriptionRetention;
+        var removedDescriptions = await dbContext.MediaDescriptions
+            .Where(x => x.CreatedAt < cutoffDate)
+            .ExecuteDeleteAsync(cancellationToken);
+        LogMediaDescriptionsCleanupComplete(removedDescriptions);
+    }
+
     [LoggerMessage(Level = LogLevel.Information, Message = "Starting cleanup job")]
     partial void LogJobStart();
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "Removed {RemovedCount} stale cached media descriptions")]
+    partial void LogMediaDescriptionsCleanupComplete(int removedCount);
 
     [LoggerMessage(Level = LogLevel.Information, Message = "Cleanup iteration started")]
     partial void LogIterationStart();

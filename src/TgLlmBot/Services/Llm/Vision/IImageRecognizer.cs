@@ -11,14 +11,10 @@ namespace TgLlmBot.Services.Llm.Vision;
 public interface IImageRecognizer
 {
     /// <summary>
-    ///     Описывает переданное изображение текстом.
+    ///     Описывает переданную картинку текстом.
     /// </summary>
-    /// <param name="jpegImage">Содержимое изображения в формате JPEG.</param>
-    /// <param name="relatedText">
-    ///     Текст, с которым изображение пришло в чат (подпись к картинке или вопрос пользователя).
-    ///     Нужен, чтобы модель уделила внимание релевантным деталям. Может отсутствовать.
-    /// </param>
+    /// <param name="request">Картинка и всё, что о ней известно.</param>
     /// <param name="cancellationToken">Токен отмены операции.</param>
     /// <returns>Текстовое описание изображения либо признак неудачи.</returns>
-    Task<Result<string>> DescribeAsync(byte[] jpegImage, string? relatedText, CancellationToken cancellationToken);
+    Task<Result<string>> DescribeAsync(ImageRecognitionRequest request, CancellationToken cancellationToken);
 }

@@ -1,7 +1,9 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Telegram.Bot.Types;
 using Telegram.Bot.Types.Enums;
 using TgLlmBot.Commands.ChatWithLlm;
@@ -19,21 +21,26 @@ using TgLlmBot.Commands.ShowChatSystemPrompt;
 using TgLlmBot.Commands.ShowPersonalSystemPrompt;
 using TgLlmBot.Commands.Usage;
 using TgLlmBot.Services.DataAccess.TelegramMessages;
+using TgLlmBot.Services.Media;
 using TgLlmBot.Services.Telegram.SelfInformation;
 using RatingCommandHandler = TgLlmBot.Commands.Rating.RatingCommandHandler;
 
 namespace TgLlmBot.CommandDispatcher;
 
-public class DefaultTelegramCommandDispatcher : ITelegramCommandDispatcher
+public partial class DefaultTelegramCommandDispatcher : ITelegramCommandDispatcher
 {
     private static readonly HashSet<MessageType> AllowedMessageTypes =
     [
         MessageType.Text,
-        MessageType.Photo
+        MessageType.Photo,
+        MessageType.Sticker
     ];
 
     private readonly ChatWithLlmCommandHandler _chatWithLlm;
     private readonly DisplayHelpCommandHandler _displayHelp;
+    private readonly ILogger<DefaultTelegramCommandDispatcher> _logger;
+    private readonly IMediaGroupTracker _mediaGroupTracker;
+    private readonly IMediaRecognitionQueues _mediaRecognitionQueues;
     private readonly ITelegramMessageStorage _messageStorage;
     private readonly ModelCommandHandler _model;
     private readonly DefaultTelegramCommandDispatcherOptions _options;
@@ -67,7 +74,10 @@ public class DefaultTelegramCommandDispatcher : ITelegramCommandDispatcher
         ResetPersonalSystemPromptCommandHandler resetPersonalSystemPrompt,
         ShowChatSystemPromptCommandHandler showChatSystemPrompt,
         ShowPersonalSystemPromptCommandHandler showPersonalSystemPrompt,
-        SetLimitCommandHandler setLimit)
+        SetLimitCommandHandler setLimit,
+        IMediaRecognitionQueues mediaRecognitionQueues,
+        IMediaGroupTracker mediaGroupTracker,
+        ILogger<DefaultTelegramCommandDispatcher> logger)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(self);
@@ -86,6 +96,9 @@ public class DefaultTelegramCommandDispatcher : ITelegramCommandDispatcher
         ArgumentNullException.ThrowIfNull(showChatSystemPrompt);
         ArgumentNullException.ThrowIfNull(showPersonalSystemPrompt);
         ArgumentNullException.ThrowIfNull(setLimit);
+        ArgumentNullException.ThrowIfNull(mediaRecognitionQueues);
+        ArgumentNullException.ThrowIfNull(mediaGroupTracker);
+        ArgumentNullException.ThrowIfNull(logger);
         _options = options;
         _self = self;
         _messageStorage = messageStorage;
@@ -103,6 +116,9 @@ public class DefaultTelegramCommandDispatcher : ITelegramCommandDispatcher
         _showChatSystemPrompt = showChatSystemPrompt;
         _showPersonalSystemPrompt = showPersonalSystemPrompt;
         _setLimit = setLimit;
+        _mediaRecognitionQueues = mediaRecognitionQueues;
+        _mediaGroupTracker = mediaGroupTracker;
+        _logger = logger;
     }
 
     public async Task HandleMessageAsync(Message? message, UpdateType type, CancellationToken cancellationToken)
@@ -120,7 +136,58 @@ public class DefaultTelegramCommandDispatcher : ITelegramCommandDispatcher
         }
 
         var self = _self.GetSelf();
-        await _messageStorage.StoreMessageAsync(message, self, cancellationToken);
+        var storedMessage = await _messageStorage.StoreMessageAsync(message, self, cancellationToken);
+        // Решаем судьбу сообщения до постановки вложений в очередь: если отвечать на него будем мы,
+        // описания ужмёт медиа-пайплайн перед ответом, а не фоновый воркер сразу
+        var chatWithLlmCommand = TryCreateChatWithLlmCommand(message, type, self);
+        var hasSupportedMedia = storedMessage.Media.Any(static m => !string.IsNullOrEmpty(m.DownloadFileId));
+        var isBotOwnMessage = storedMessage.IsLlmReplyToMessage;
+
+        // Регистрируем альбом даже без вложений: по этой отметке фронтовое задание понимает,
+        // что пачка ещё едет, и не отвечает по половине картинок
+        if (!isBotOwnMessage && !string.IsNullOrEmpty(storedMessage.MediaGroupId))
+        {
+            _mediaGroupTracker.Register(storedMessage.ChatId, storedMessage.MediaGroupId);
+        }
+
+        if (!isBotOwnMessage)
+        {
+            if (chatWithLlmCommand is not null && hasSupportedMedia)
+            {
+                // Сообщение адресовано боту и несёт картинки: ответ пойдёт только после распознавания
+                // и компактинга, поэтому дальше обрабатываем в медиа-пайплайне, а команду в LLM-очередь
+                // поставит воркер. Постановка во фронт блокирующая: дропать ответ недопустимо.
+                var job = new MediaRecognitionJob(
+                    message,
+                    storedMessage,
+                    message.Caption ?? message.Text,
+                    requiresResponse: true,
+                    command: chatWithLlmCommand);
+                if (!await _mediaRecognitionQueues.EnqueueAsync(storedMessage.ChatId, job, cancellationToken))
+                {
+                    Log.MediaNotEnqueued(_logger, storedMessage.ChatId, storedMessage.MessageId);
+                }
+
+                return;
+            }
+
+            if (hasSupportedMedia)
+            {
+                // Сообщение просто ложится в историю: вложения распознаются в фоне, в конец очереди.
+                // Не блокирует разгребание входящих сообщений.
+                var job = new MediaRecognitionJob(
+                    message,
+                    storedMessage,
+                    message.Caption ?? message.Text,
+                    requiresResponse: false,
+                    command: null);
+                if (!await _mediaRecognitionQueues.EnqueueAsync(storedMessage.ChatId, job, cancellationToken))
+                {
+                    Log.MediaNotEnqueued(_logger, storedMessage.ChatId, storedMessage.MessageId);
+                }
+            }
+        }
+
         // ReSharper disable once ConditionalAccessQualifierIsNonNullableAccordingToAPIContract
         var rawPrompt = $"{message.Text?.Trim()?.ToLowerInvariant()}";
         switch (rawPrompt)
@@ -208,20 +275,45 @@ public class DefaultTelegramCommandDispatcher : ITelegramCommandDispatcher
             return;
         }
 
+        if (chatWithLlmCommand is not null)
+        {
+            await _chatWithLlm.HandleAsync(chatWithLlmCommand, cancellationToken);
+        }
+    }
+
+    /// <summary>
+    ///     Собирает запрос к LLM, если сообщение адресовано боту и отвечать на него ещё не начали.
+    /// </summary>
+    private ChatWithLlmCommand? TryCreateChatWithLlmCommand(Message message, UpdateType type, User self)
+    {
         var prompt = message.Text ?? message.Caption;
-        if (message.Chat.Type == ChatType.Private)
+        var isAddressedToBot = message.Chat.Type switch
         {
-            var command = new ChatWithLlmCommand(message, type, self, prompt);
-            await _chatWithLlm.HandleAsync(command, cancellationToken);
-        }
-        else if (message.Chat.Type is ChatType.Group or ChatType.Supergroup)
+            ChatType.Private => true,
+            ChatType.Group or ChatType.Supergroup =>
+                prompt?.StartsWith(_options.BotName, StringComparison.OrdinalIgnoreCase) is true
+                || message.ReplyToMessage?.From?.Id == self.Id,
+            _ => false
+        };
+        if (!isAddressedToBot)
         {
-            if (prompt?.StartsWith(_options.BotName, StringComparison.OrdinalIgnoreCase) is true
-                || message.ReplyToMessage?.From?.Id == self.Id)
-            {
-                var command = new ChatWithLlmCommand(message, type, self, prompt);
-                await _chatWithLlm.HandleAsync(command, cancellationToken);
-            }
+            return null;
         }
+
+        // Альбом - это N отдельных сообщений, и условию "адресовано боту" удовлетворяет каждое из них.
+        // Отвечаем один раз на всю пачку: подписи и вложения остальных частей обработчик соберёт сам
+        if (!string.IsNullOrEmpty(message.MediaGroupId)
+            && !_mediaGroupTracker.TryBeginLlmRequest(message.Chat.Id, message.MediaGroupId))
+        {
+            return null;
+        }
+
+        return new(message, type, self, prompt);
+    }
+
+    private static partial class Log
+    {
+        [LoggerMessage(Level = LogLevel.Warning, Message = "Media recognition queue rejected attachments of message {MessageId} in chat {ChatId}")]
+        public static partial void MediaNotEnqueued(ILogger logger, long chatId, int messageId);
     }
 }

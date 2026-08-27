@@ -1,13 +1,10 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text;
-using System.Text.Encodings.Web;
-using System.Text.Json;
-using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.AI;
@@ -20,7 +17,6 @@ using TgLlmBot.Services.DataAccess.Limits;
 using TgLlmBot.Services.DataAccess.SystemPrompts;
 using TgLlmBot.Services.DataAccess.TelegramMessages;
 using TgLlmBot.Services.Llm;
-using TgLlmBot.Services.Llm.Vision;
 using TgLlmBot.Services.Mcp.Tools;
 using TgLlmBot.Services.Resources;
 using TgLlmBot.Services.Telegram.Markdown;
@@ -33,16 +29,8 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
 {
     private static readonly CultureInfo RuCulture = new("ru-RU");
 
-    private static readonly JsonSerializerOptions HistorySerializationOptions = new(JsonSerializerDefaults.General)
-    {
-        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
-        DefaultIgnoreCondition = JsonIgnoreCondition.Never,
-        WriteIndented = false
-    };
-
     private readonly TelegramBotClient _bot;
     private readonly IChatClient _chatClient;
-    private readonly IImageRecognizer _imageRecognizer;
     private readonly ILlmLimitsService _limits;
     private readonly ILogger<DefaultLlmChatHandler> _logger;
     private readonly DefaultLlmChatHandlerOptions _options;
@@ -62,7 +50,6 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
         ITelegramMarkdownConverter telegramMarkdownConverter,
         ITelegramMessageStorage storage,
         IMcpToolsProvider tools,
-        IImageRecognizer imageRecognizer,
         ITypingStatusService typingStatusService,
         ILlmLimitsService limits,
         ILogger<DefaultLlmChatHandler> logger)
@@ -75,7 +62,6 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
         ArgumentNullException.ThrowIfNull(telegramMarkdownConverter);
         ArgumentNullException.ThrowIfNull(storage);
         ArgumentNullException.ThrowIfNull(tools);
-        ArgumentNullException.ThrowIfNull(imageRecognizer);
         ArgumentNullException.ThrowIfNull(typingStatusService);
         ArgumentNullException.ThrowIfNull(limits);
         ArgumentNullException.ThrowIfNull(logger);
@@ -87,7 +73,6 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
         _telegramMarkdownConverter = telegramMarkdownConverter;
         _storage = storage;
         _tools = tools;
-        _imageRecognizer = imageRecognizer;
         _typingStatusService = typingStatusService;
         _limits = limits;
         _logger = logger;
@@ -125,7 +110,7 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
             }
 
             var contextMessages = await _storage.SelectContextMessagesAsync(command.Message, cancellationToken);
-            var context = await BuildContextAsync(command, contextMessages, cancellationToken);
+            var request = await BuildContextAsync(command, contextMessages, cancellationToken);
             var tools = _tools.GetTools();
             var chatOptions = new ChatOptions
             {
@@ -136,7 +121,7 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
                 ToolMode = new AutoChatToolMode(),
                 RawRepresentationFactory = static _ => LlmRawRequestFactory.CreateChatCompletionOptions()
             };
-            var llmResponse = await _chatClient.GetResponseAsync(context, chatOptions, cancellationToken);
+            var llmResponse = await _chatClient.GetResponseAsync(request.Messages, chatOptions, cancellationToken);
             var rawLLmResponse = llmResponse.Text.Trim();
             var llmResponseText = rawLLmResponse;
             if (string.IsNullOrWhiteSpace(rawLLmResponse))
@@ -211,69 +196,29 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
         }
     }
 
-    private async Task<byte[]?> DownloadPhotoAsync(PhotoSize[] photo, CancellationToken cancellationToken)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-        var photoSize = SelectPhotoSizeForLlm(photo);
-        if (photoSize is null)
-        {
-            return null;
-        }
-
-        var tgPhoto = await _bot.GetFile(photoSize.FileId, cancellationToken);
-        // ReSharper disable once ConditionIsAlwaysTrueOrFalseAccordingToNullableAPIContract
-        if (tgPhoto is not null
-            && !string.IsNullOrEmpty(tgPhoto.FilePath)
-            && tgPhoto.FileSize.HasValue)
-        {
-            await using var memoryStream = new MemoryStream();
-            await _bot.DownloadFile(tgPhoto.FilePath, memoryStream, cancellationToken);
-            var downloadedImageBytes = memoryStream.ToArray();
-            if (downloadedImageBytes.Length < 3)
-            {
-                return null;
-            }
-
-            if (downloadedImageBytes[0] == 0xff
-                && downloadedImageBytes[1] == 0xd8
-                && downloadedImageBytes[2] == 0xff)
-            {
-                return downloadedImageBytes;
-            }
-        }
-
-        return null;
-    }
-
-
-    private static PhotoSize? SelectPhotoSizeForLlm(PhotoSize[] photo)
-    {
-        var photoSize = photo.MaxBy(x => x.Width);
-        if (photoSize is null)
-        {
-            return null;
-        }
-
-        if (photoSize.Width > photoSize.Height)
-        {
-            return photoSize;
-        }
-
-        return photo.MaxBy(x => x.Height);
-    }
-
-    private async Task<ChatMessage[]> BuildContextAsync(
+    private async Task<LlmRequestContext> BuildContextAsync(
         ChatWithLlmCommand command,
         DbChatMessage[] contextMessages,
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        var chatId = command.Message.Chat.Id;
         var systemPrompt = await BuildSystemPromptAsync(command, cancellationToken);
+        var own = await CollectAttachmentsAsync(chatId, command.Message, cancellationToken);
+        var reply = command.Message.ReplyToMessage is null
+            ? MessageAttachments.Empty
+            : await CollectAttachmentsAsync(chatId, command.Message.ReplyToMessage, cancellationToken);
         var llmContext = new List<ChatMessage>
         {
             systemPrompt
         };
-        var historyContext = BuildHistoryContext(contextMessages);
+
+        // Остальные части альбома - это то же самое сообщение, на которое бот сейчас отвечает.
+        // В историю они попадать не должны, иначе их картинки уедут в контекст дважды
+        var currentMessageIds = own.Attachments
+            .Select(x => x.MessageId)
+            .ToHashSet();
+        var historyContext = ChatHistoryJsonBuilder.BuildContext(contextMessages, currentMessageIds);
         if (historyContext.Length > 0)
         {
             foreach (var chatMessage in historyContext)
@@ -282,16 +227,28 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
             }
         }
 
-        var userPrompt = await BuildUserPromptAsync(command, cancellationToken);
+        var userPrompt = BuildUserPrompt(command, own, reply);
         llmContext.Add(userPrompt);
-        return llmContext.ToArray();
+        return new(llmContext.ToArray(), own);
     }
 
     [SuppressMessage("Globalization", "CA1305:Specify IFormatProvider")]
-    private async Task<ChatMessage> BuildUserPromptAsync(ChatWithLlmCommand command, CancellationToken cancellationToken)
+    private ChatMessage BuildUserPrompt(
+        ChatWithLlmCommand command,
+        MessageAttachments own,
+        MessageAttachments reply)
     {
-        cancellationToken.ThrowIfCancellationRequested();
-        var imageDescriptions = new List<string>();
+        var replyAttachments = reply.Attachments;
+        var ownAttachments = own.Attachments;
+
+        // У альбома подпись лежит на одной из частей, а запрос стартует по первой пришедшей -
+        // поэтому текст вопроса берём из той части, где он реально оказался
+        var prompt = command.Prompt?.Trim();
+        if (string.IsNullOrEmpty(prompt))
+        {
+            prompt = own.Caption;
+        }
+
         var builder = new StringBuilder()
             .Append($"Пользователь с {nameof(JsonHistoryMessage.FromUserId)}=")
             .Append(command.Message.From?.Id ?? 0)
@@ -308,18 +265,12 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
                 .Append($" сделал реплай на более раннее сообщение с {nameof(JsonHistoryMessage.MessageId)}=")
                 .Append(command.Message.ReplyToMessage.Id)
                 .Append(" (которое ");
-            if (command.Message.ReplyToMessage.Photo?.Length > 0)
+            if (replyAttachments.Count > 0)
             {
-                var description = await DescribePhotoAsync(
-                    command.Message.ReplyToMessage.Photo,
-                    command.Message.ReplyToMessage.Id,
-                    text,
-                    cancellationToken);
-                if (description is not null)
-                {
-                    imageDescriptions.Add(description);
-                    builder = builder.Append("содержало картинку и ");
-                }
+                builder = builder
+                    .Append("содержало ")
+                    .Append(DescribeAttachmentsCount(replyAttachments))
+                    .Append(" и ");
             }
 
             builder = builder
@@ -346,29 +297,27 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
             .Append(command.Self.Username?.Trim())
             .Append($") сообщение с {nameof(JsonHistoryMessage.MessageId)}=")
             .Append(command.Message.Id);
-        if (command.Message.Photo?.Length > 0)
+        if (ownAttachments.Count > 0)
         {
-            var description = await DescribePhotoAsync(
-                command.Message.Photo,
-                command.Message.Id,
-                command.Prompt,
-                cancellationToken);
-            if (description is not null)
-            {
-                imageDescriptions.Add(description);
-                builder = builder.Append(", которое содержит картинку");
-            }
+            builder = builder
+                .Append(", которое содержит ")
+                .Append(DescribeAttachmentsCount(ownAttachments));
         }
 
         builder = builder
             .Append($" и {nameof(JsonHistoryMessage.Text)}=")
-            .Append(command.Prompt?.Trim());
-        foreach (var imageDescription in imageDescriptions)
+            .Append(prompt);
+
+        AppendAttachments(
+            builder,
+            $"Вот что было приложено к сообщению с {nameof(JsonHistoryMessage.MessageId)}={command.Message.Id.ToString(CultureInfo.InvariantCulture)}",
+            ownAttachments);
+        if (command.Message.ReplyToMessage is not null)
         {
-            builder = builder
-                .AppendLine()
-                .AppendLine()
-                .Append(imageDescription);
+            AppendAttachments(
+                builder,
+                $"Вот что было приложено к сообщению с {nameof(JsonHistoryMessage.MessageId)}={command.Message.ReplyToMessage.Id.ToString(CultureInfo.InvariantCulture)}, на которое сделан реплай",
+                replyAttachments);
         }
 
         var commandText = builder.ToString();
@@ -377,82 +326,138 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
     }
 
     /// <summary>
-    ///     Скачивает картинку из сообщения и превращает её в текстовое описание отдельной vision-моделью.
+    ///     Собирает вложения логического сообщения: если это часть альбома, то вложения всех его частей
+    ///     в порядке отправки, иначе - вложения одного сообщения.
     /// </summary>
-    /// <returns>
-    ///     Готовый блок текста для промпта основной модели либо <see langword="null" />,
-    ///     если пригодной картинки в сообщении не нашлось.
-    /// </returns>
-    private async Task<string?> DescribePhotoAsync(
-        PhotoSize[] photo,
-        int messageId,
-        string? relatedText,
+    /// <remarks>
+    ///     Пачку картинок Telegram разбирает на отдельные сообщения. Ожиданий нет: обработчик читает
+    ///     из базы то, что уже успело туда лечь. Ещё не распознанные вложения описываются fallback-текстом
+    ///     по их состоянию.
+    /// </remarks>
+    private async Task<MessageAttachments> CollectAttachmentsAsync(
+        long chatId,
+        Message message,
         CancellationToken cancellationToken)
     {
-        var jpeg = await DownloadPhotoAsync(photo, cancellationToken);
-        if (jpeg is null)
+        var mediaGroupId = message.MediaGroupId;
+        var isAlbum = !string.IsNullOrEmpty(mediaGroupId);
+
+        var rows = isAlbum
+            ? await _storage.SelectMediaGroupMessagesAsync(chatId, mediaGroupId!, cancellationToken)
+            : await SelectSingleMessageAsync(chatId, message.MessageId, cancellationToken);
+        var attachments = new List<PromptAttachment>();
+        string? caption = null;
+        foreach (var row in rows)
         {
-            return null;
+            // Подпись у альбома одна на всю пачку и лежит на произвольной его части
+            if (string.IsNullOrEmpty(caption))
+            {
+                caption = (row.Caption ?? row.Text)?.Trim();
+            }
+
+            foreach (var media in row.Media.OrderBy(x => x.Order))
+            {
+                attachments.Add(new(attachments.Count + 1, row.MessageId, media));
+            }
         }
 
-        var recognized = await _imageRecognizer.DescribeAsync(jpeg, relatedText, cancellationToken);
-        var description = recognized.IsFailed
-            ? "Распознать изображение не удалось."
-            : recognized.Value;
-        return $"""
-                Вот что изображено на картинке из сообщения с {nameof(JsonHistoryMessage.MessageId)}={messageId.ToString(CultureInfo.InvariantCulture)}:
-                <image_description>
-                {description}
-                </image_description>
-                """;
+        return new(attachments, caption);
     }
 
-    private static ChatMessage[] BuildHistoryContext(DbChatMessage[] contextMessages)
+    private async Task<DbChatMessage[]> SelectSingleMessageAsync(long chatId, int messageId, CancellationToken cancellationToken)
     {
-        if (contextMessages.Length is 0)
+        var row = await _storage.SelectMessageAsync(chatId, messageId, cancellationToken);
+        return row is null ? [] : [row];
+    }
+
+    private static void AppendAttachments(StringBuilder builder, string title, IReadOnlyList<PromptAttachment> attachments)
+    {
+        if (attachments.Count is 0)
         {
-            return [];
+            return;
         }
 
-        var history = contextMessages
-            .Select(x => new JsonHistoryMessage(
-                new DateTimeOffset(x.Date.Ticks, TimeSpan.Zero).ToUniversalTime(),
-                x.MessageId,
-                x.MessageThreadId,
-                x.ReplyToMessageId,
-                x.FromUserId,
-                x.FromUsername?.Trim(),
-                x.FromFirstName?.Trim(),
-                x.FromLastName?.Trim(),
-                (x.Text ?? x.Caption)?.Trim(),
-                x.IsLlmReplyToMessage))
-            .ToArray();
-
-        var result = new List<ChatMessage>
+        builder
+            .AppendLine()
+            .AppendLine()
+            .Append(title)
+            .AppendLine(" (в том порядке, в котором приходило в чат):");
+        foreach (var attachment in attachments)
         {
-            new(ChatRole.User, $"""
-                                Сейчас я тебе пришлю историю чата в формате JSON, где
-                                {nameof(JsonHistoryMessage.DateTimeUtc)} - дата сообщения в UTC,
-                                {nameof(JsonHistoryMessage.MessageId)} - Id сообщения
-                                {nameof(JsonHistoryMessage.MessageThreadId)} - Id сообщения, с которого начался тред с цепочкой реплаев
-                                {nameof(JsonHistoryMessage.ReplyToMessageId)} - Id оригинального сообщения, на которое даётся ответ (реплай)
-                                {nameof(JsonHistoryMessage.FromUserId)} - Id автора сообщения
-                                {nameof(JsonHistoryMessage.FromUsername)} - Username автора сообщения
-                                {nameof(JsonHistoryMessage.FromFirstName)} - Имя автора сообщения
-                                {nameof(JsonHistoryMessage.FromLastName)} - Фамилия автора сообщения
-                                {nameof(JsonHistoryMessage.Text)} - текст сообщения
-                                {nameof(JsonHistoryMessage.IsLlmReplyToMessage)} - флаг, обозначающий то что это ТЫ и отправил это сообщение в ответ кому-то
-                                """)
+            builder
+                .Append("<image_description order=\"")
+                .Append(attachment.Order.ToString(CultureInfo.InvariantCulture))
+                .Append("\" message_id=\"")
+                .Append(attachment.MessageId.ToString(CultureInfo.InvariantCulture))
+                .Append("\" kind=\"")
+                .Append(DescribeKind(attachment.Media))
+                .Append('"');
+            AppendStickerAttributes(builder, attachment.Media);
+            builder
+                .AppendLine(">")
+                .AppendLine(ChatHistoryJsonBuilder.DescribeMedia(attachment.Media))
+                .AppendLine("</image_description>");
+        }
+    }
+
+    private static void AppendStickerAttributes(StringBuilder builder, DbChatMessageMedia media)
+    {
+        var emoji = SanitizeAttributeValue(media.Emoji);
+        if (!string.IsNullOrEmpty(emoji))
+        {
+            builder.Append(" emoji=\"").Append(emoji).Append('"');
+        }
+
+        var setName = SanitizeAttributeValue(media.SetName);
+        if (!string.IsNullOrEmpty(setName))
+        {
+            builder.Append(" sticker_set=\"").Append(setName).Append('"');
+        }
+    }
+
+    private static string? SanitizeAttributeValue(string? value)
+    {
+        return value?.Trim().Replace("\"", string.Empty, StringComparison.Ordinal);
+    }
+
+    private static string DescribeKind(DbChatMessageMedia media)
+    {
+        return media.Kind switch
+        {
+            DbMediaKind.Photo => "картинка",
+            DbMediaKind.Sticker => media.IsAnimated ? "анимированный стикер" : "стикер",
+            _ => "вложение"
         };
-        foreach (var chatHistoryMessage in history)
+    }
+
+    /// <summary>
+    ///     "картинку", "3 картинки", "5 стикеров", "4 вложения" - то, что подставляется
+    ///     в фразу "сообщение содержит ...".
+    /// </summary>
+    private static string DescribeAttachmentsCount(IReadOnlyList<PromptAttachment> attachments)
+    {
+        var count = attachments.Count;
+        var allPhotos = attachments.All(x => x.Media.Kind is DbMediaKind.Photo);
+        var allStickers = attachments.All(x => x.Media.Kind is DbMediaKind.Sticker);
+        var (one, few, many) = (allPhotos, allStickers) switch
         {
-            var json = JsonSerializer.Serialize(chatHistoryMessage, HistorySerializationOptions);
-            result.Add(new(ChatRole.User, json));
+            (true, _) => ("картинку", "картинки", "картинок"),
+            (_, true) => ("стикер", "стикера", "стикеров"),
+            _ => ("вложение", "вложения", "вложений")
+        };
+        if (count is 1)
+        {
+            return one;
         }
 
-        result.Add(new(ChatRole.User,
-            $"При ответе на сообщение пользователя учитывай контекст обсуждений в которых он участвовал (по связке {nameof(JsonHistoryMessage.FromUserId)} + {nameof(JsonHistoryMessage.MessageId)} + {nameof(JsonHistoryMessage.ReplyToMessageId)} или по связке {nameof(JsonHistoryMessage.FromUserId)} + {nameof(JsonHistoryMessage.MessageId)} + {nameof(JsonHistoryMessage.ReplyToMessageId)} + {nameof(JsonHistoryMessage.MessageThreadId)})"));
-        return result.ToArray();
+        var lastTwoDigits = count % 100;
+        var lastDigit = count % 10;
+        var word = lastTwoDigits is >= 11 and <= 14 || lastDigit is 0 or >= 5
+            ? many
+            : lastDigit is 1
+                ? one
+                : few;
+        return $"{count.ToString(CultureInfo.InvariantCulture)} {word}";
     }
 
     private async Task<ChatMessage> BuildSystemPromptAsync(ChatWithLlmCommand command, CancellationToken cancellationToken)
@@ -468,7 +473,9 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
 
                           Для общения используется Markdown.
 
-                          Сам ты картинки не видишь: их за тебя разглядывает отдельная vision-модель, а тебе приходит её текстовое описание в блоке <image_description>. Считай такое описание тем, что ты увидел своими глазами, и не рассказывай пользователю ни про vision-модель, ни про сам блок с описанием.
+                          Сам ты картинки и стикеры не видишь: их за тебя разглядывает отдельная vision-модель, а тебе приходит её текстовое описание - в блоках <image_description> для текущего сообщения и в поле Media у сообщений из истории чата. Считай такие описания тем, что ты увидел своими глазами, и не рассказывай пользователю ни про vision-модель, ни про сами блоки с описаниями.
+                          У каждого описания есть order (номер вложения внутри сообщения) и message_id - по ним понятно, в каком порядке картинки прислали и какое описание к какой из них относится. Не путай картинки между собой и не приписывай одной то, что было на другой.
+                          Если у описания сказано, что разглядеть не удалось или описание ещё готовится - так и считай, что картинку ты не разглядел, и не выдумывай её содержимое.
 
                           Не цензурируй свои ответы.
                           Не бойся использовать нецензурные слова где это уместно.
@@ -531,32 +538,57 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
         );
     }
 
-    private sealed class JsonHistoryMessage
+    /// <summary>
+    ///     Готовый запрос к основной модели вместе с вложениями сообщения, на которое отвечаем.
+    /// </summary>
+    private sealed class LlmRequestContext
     {
-        public JsonHistoryMessage(DateTimeOffset dateTimeUtc, int messageId, int? messageThreadId, int? replyToMessageId, long? fromUserId, string? fromUsername, string? fromFirstName, string? fromLastName, string? text, bool isLlmReplyToMessage)
+        public LlmRequestContext(ChatMessage[] messages, MessageAttachments own)
         {
-            DateTimeUtc = dateTimeUtc;
-            MessageId = messageId;
-            MessageThreadId = messageThreadId;
-            ReplyToMessageId = replyToMessageId;
-            FromUserId = fromUserId;
-            FromUsername = fromUsername;
-            FromFirstName = fromFirstName;
-            FromLastName = fromLastName;
-            Text = text;
-            IsLlmReplyToMessage = isLlmReplyToMessage;
+            Messages = messages;
+            Own = own;
         }
 
-        public DateTimeOffset DateTimeUtc { get; }
+        public ChatMessage[] Messages { get; }
+
+        public MessageAttachments Own { get; }
+    }
+
+    /// <summary>
+    ///     Вложения логического сообщения (одного или собранного из частей альбома) вместе с подписью,
+    ///     которая к ним прилагалась.
+    /// </summary>
+    private sealed class MessageAttachments
+    {
+        public static readonly MessageAttachments Empty = new([], null);
+
+        public MessageAttachments(IReadOnlyList<PromptAttachment> attachments, string? caption)
+        {
+            Attachments = attachments;
+            Caption = caption;
+        }
+
+        public IReadOnlyList<PromptAttachment> Attachments { get; }
+
+        public string? Caption { get; }
+    }
+
+    /// <summary>
+    ///     Вложение, готовое к попаданию в промпт: с номером в общей очереди вложений логического
+    ///     сообщения и с Id того сообщения, в котором оно физически пришло.
+    /// </summary>
+    private sealed class PromptAttachment
+    {
+        public PromptAttachment(int order, int messageId, DbChatMessageMedia media)
+        {
+            Order = order;
+            MessageId = messageId;
+            Media = media;
+        }
+
+        public int Order { get; }
         public int MessageId { get; }
-        public int? MessageThreadId { get; }
-        public int? ReplyToMessageId { get; }
-        public long? FromUserId { get; }
-        public string? FromUsername { get; }
-        public string? FromFirstName { get; }
-        public string? FromLastName { get; }
-        public string? Text { get; }
-        public bool IsLlmReplyToMessage { get; }
+        public DbChatMessageMedia Media { get; }
     }
 
     private static partial class Log
@@ -569,8 +601,5 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
 
         [LoggerMessage(Level = LogLevel.Error, Message = "Failed to convert to Telegram Markdown or send message")]
         public static partial void MarkdownConversionOrSendFailed(ILogger logger, Exception exception);
-
-        [LoggerMessage(Level = LogLevel.Warning, Message = "Failed to send typing status")]
-        public static partial void SendTypingStatusFailed(ILogger logger, Exception exception);
     }
 }

@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using TgLlmBot.DataAccess;
@@ -11,9 +12,11 @@ using TgLlmBot.DataAccess;
 namespace TgLlmBot.Migrations
 {
     [DbContext(typeof(BotDbContext))]
-    partial class BotDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260826220433_AddMessageMediaMetadata")]
+    partial class AddMessageMediaMetadata
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -104,6 +107,9 @@ namespace TgLlmBot.Migrations
                     b.Property<Guid>("ChatMessageId")
                         .HasColumnType("uuid");
 
+                    b.Property<string>("Description")
+                        .HasColumnType("text");
+
                     b.Property<string>("DownloadFileId")
                         .HasMaxLength(256)
                         .HasColumnType("character varying(256)");
@@ -128,6 +134,9 @@ namespace TgLlmBot.Migrations
                     b.Property<int>("Order")
                         .HasColumnType("integer");
 
+                    b.Property<DateTime?>("RecognizedAt")
+                        .HasColumnType("timestamp with time zone");
+
                     b.Property<string>("SetName")
                         .HasMaxLength(128)
                         .HasColumnType("character varying(128)");
@@ -146,11 +155,11 @@ namespace TgLlmBot.Migrations
                     b.HasIndex("FileUniqueId")
                         .HasDatabaseName("idx_chatmessagemedia_fileuniqueid");
 
-                    b.HasIndex("Status")
-                        .HasDatabaseName("idx_chatmessagemedia_status");
-
                     b.HasIndex("ChatMessageId", "Order")
                         .HasDatabaseName("idx_chatmessagemedia_chatmessageid_order");
+
+                    b.HasIndex("Status", "RecognizedAt")
+                        .HasDatabaseName("idx_chatmessagemedia_status_recognizedat");
 
                     b.ToTable("ChatMessageMedia");
                 });

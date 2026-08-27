@@ -6,6 +6,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
+using TgLlmBot.DataAccess.Models;
 using TgLlmBot.Models;
 
 namespace TgLlmBot.Services.Llm.Vision;
@@ -32,7 +33,24 @@ public partial class DefaultImageRecognizer : IImageRecognizer
                                         Отвечай простым текстом без Markdown-разметки.
                                         """;
 
-    private const string UserPrompt = "Опиши это изображение.";
+    private const string StickerSystemPrompt = """
+                                               Ты - система компьютерного зрения. Тебе показывают стикер из Telegram, твоя задача - максимально подробно и точно описать его на русском языке.
+                                               Описывай: кто или что изображено, позу, жест, выражение лица и эмоцию, стиль рисунка, цвета, фон.
+                                               Дословно приводи весь текст, который виден на стикере, сохраняя его исходный язык и орфографию.
+                                               Отдельно скажи, какое настроение или реакцию стикер передаёт - именно ради этого его и присылают в переписке.
+                                               Если стикер узнаваемый (персонаж из мема, фильма, игры, мультфильма) - назови первоисточник, но только если уверен.
+                                               Описывай только то, что реально видишь, ничего не додумывай. Если чего-то не разобрать - так и напиши.
+                                               Не давай оценок увиденному и не отвечай на вопросы - только описывай.
+                                               Не цензурируй описание.
+                                               Отвечай простым текстом без Markdown-разметки.
+                                               """;
+
+    private const string ImageUserPrompt = "Опиши это изображение.";
+
+    private const string StickerUserPrompt = "Опиши этот стикер.";
+
+    private const string AnimatedStickerNote =
+        "Это один статический кадр анимированного стикера, движение по нему не видно - описывай то, что есть на кадре.";
 
     private readonly IChatClient _chatClient;
     private readonly ILogger<DefaultImageRecognizer> _logger;
@@ -48,22 +66,23 @@ public partial class DefaultImageRecognizer : IImageRecognizer
     }
 
     [SuppressMessage("Design", "CA1031:Do not catch general exception types")]
-    public async Task<Result<string>> DescribeAsync(byte[] jpegImage, string? relatedText, CancellationToken cancellationToken)
+    public async Task<Result<string>> DescribeAsync(ImageRecognitionRequest request, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        ArgumentNullException.ThrowIfNull(jpegImage);
-        if (jpegImage.Length is 0)
+        ArgumentNullException.ThrowIfNull(request);
+        if (request.Content.Length is 0)
         {
             return Result<string>.Fail();
         }
 
+        var isSticker = request.Kind is DbMediaKind.Sticker;
         var context = new List<ChatMessage>
         {
-            new(ChatRole.System, SystemPrompt),
+            new(ChatRole.System, isSticker ? StickerSystemPrompt : SystemPrompt),
             new(ChatRole.User, new List<AIContent>
             {
-                new DataContent(jpegImage, "image/jpeg"),
-                new TextContent(BuildUserPrompt(relatedText))
+                new DataContent(request.Content, request.MediaType),
+                new TextContent(BuildUserPrompt(request))
             })
         };
         var chatOptions = new ChatOptions
@@ -77,42 +96,51 @@ public partial class DefaultImageRecognizer : IImageRecognizer
             var description = response.Text.Trim();
             if (string.IsNullOrEmpty(description))
             {
-                Log.EmptyImageDescription(_logger, jpegImage.Length);
+                Log.EmptyImageDescription(_logger, request.Content.Length);
                 return Result<string>.Fail();
             }
 
-            Log.ImageRecognized(_logger, jpegImage.Length, description.Length);
+            Log.ImageRecognized(_logger, request.Content.Length, request.MediaType, description.Length);
             return Result<string>.Success(description);
         }
         catch (Exception ex)
         {
-            Log.ImageRecognitionFailed(_logger, jpegImage.Length, ex);
+            Log.ImageRecognitionFailed(_logger, request.Content.Length, ex);
             return Result<string>.Fail();
         }
     }
 
-    private static string BuildUserPrompt(string? relatedText)
+    private static string BuildUserPrompt(ImageRecognitionRequest request)
     {
-        var trimmedRelatedText = relatedText?.Trim();
-        if (string.IsNullOrEmpty(trimmedRelatedText))
+        var isSticker = request.Kind is DbMediaKind.Sticker;
+        var builder = new StringBuilder(isSticker ? StickerUserPrompt : ImageUserPrompt);
+        if (request.IsAnimated)
         {
-            return UserPrompt;
+            builder = builder
+                .AppendLine()
+                .AppendLine()
+                .Append(AnimatedStickerNote);
         }
 
-        return new StringBuilder(UserPrompt)
-            .AppendLine()
-            .AppendLine()
-            .AppendLine("В чате изображение сопровождалось таким текстом:")
-            .AppendLine(trimmedRelatedText)
-            .AppendLine()
-            .Append("Удели особое внимание тем деталям изображения, которые нужны, чтобы понять этот текст, но сам на него не отвечай.")
-            .ToString();
+        var trimmedRelatedText = request.RelatedText?.Trim();
+        if (!string.IsNullOrEmpty(trimmedRelatedText))
+        {
+            builder = builder
+                .AppendLine()
+                .AppendLine()
+                .AppendLine("В чате изображение сопровождалось таким текстом:")
+                .AppendLine(trimmedRelatedText)
+                .AppendLine()
+                .Append("Удели особое внимание тем деталям изображения, которые нужны, чтобы понять этот текст, но сам на него не отвечай.");
+        }
+
+        return builder.ToString();
     }
 
     private static partial class Log
     {
-        [LoggerMessage(Level = LogLevel.Information, Message = "Recognized image of {ImageBytes} bytes into description of {DescriptionLength} characters")]
-        public static partial void ImageRecognized(ILogger logger, int imageBytes, int descriptionLength);
+        [LoggerMessage(Level = LogLevel.Information, Message = "Recognized {MediaType} image of {ImageBytes} bytes into description of {DescriptionLength} characters")]
+        public static partial void ImageRecognized(ILogger logger, int imageBytes, string mediaType, int descriptionLength);
 
         [LoggerMessage(Level = LogLevel.Warning, Message = "Vision model returned an empty description for image of {ImageBytes} bytes")]
         public static partial void EmptyImageDescription(ILogger logger, int imageBytes);

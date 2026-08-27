@@ -44,12 +44,15 @@ using TgLlmBot.DataAccess.Design;
 using TgLlmBot.Extensions.Configuration;
 using TgLlmBot.Services.DataAccess.KickedUsers;
 using TgLlmBot.Services.DataAccess.Limits;
+using TgLlmBot.Services.DataAccess.MediaDescriptions;
 using TgLlmBot.Services.DataAccess.SystemPrompts;
 using TgLlmBot.Services.DataAccess.TelegramMessages;
+using TgLlmBot.Services.Llm.Compression;
 using TgLlmBot.Services.Llm.Vision;
 using TgLlmBot.Services.Mcp.Clients.Github;
 using TgLlmBot.Services.Mcp.Enums;
 using TgLlmBot.Services.Mcp.Tools;
+using TgLlmBot.Services.Media;
 using TgLlmBot.Services.OpenRouter;
 using TgLlmBot.Services.Telegram.Markdown;
 using TgLlmBot.Services.Telegram.RequestHandler;
@@ -67,11 +70,21 @@ public partial class Program
 
     private const string LlmVisionClientKey = "llm-vision";
 
+    private const string LlmCompactionHttpClient = "llm-compaction-http-client";
+
+    private const string LlmCompactionClientKey = "llm-compaction";
+
     private const int LlmRequestQueueCapacityPerChat = 200;
+
+    private const int MediaRecognitionQueueCapacityPerChat = 200;
+
+    private static readonly TimeSpan MediaSweepInterval = TimeSpan.FromMinutes(5);
 
     private static readonly TimeSpan LlmRequestTimeout = TimeSpan.FromSeconds(3600);
 
     private static readonly TimeSpan LlmVisionRequestTimeout = TimeSpan.FromSeconds(300);
+
+    private static readonly TimeSpan LlmCompactionRequestTimeout = TimeSpan.FromSeconds(600);
 
     [SuppressMessage("ReSharper", "ConvertToUsingDeclaration")]
     [SuppressMessage("Design", "CA1031:Do not catch general exception types")]
@@ -283,6 +296,59 @@ public partial class Program
             var recognizerLogger = resolver.GetRequiredService<ILogger<DefaultImageRecognizer>>();
             return new DefaultImageRecognizer(visionChatClient, recognizerLogger);
         });
+        // Распознавание вложений: отдельные от LLM-запросов per-chat очереди, потому что описывать
+        // надо все картинки чата, а не только те, что пришли вместе с обращением к боту
+        builder.Services.AddSingleton<ITelegramMediaDownloader, DefaultTelegramMediaDownloader>();
+        builder.Services.AddSingleton<IMediaDescriptionCache, DefaultMediaDescriptionCache>();
+        builder.Services.AddSingleton<IMediaGroupTracker, DefaultMediaGroupTracker>();
+        // Ужимает подробные описания до размера истории - уже основной моделью, а не vision:
+        // отдельный инстанс той же модели, но без инструментов, с запасом на историю в запросе
+        builder.Services.AddHttpClient(LlmCompactionHttpClient, httpClient => httpClient.Timeout = LlmCompactionRequestTimeout);
+        builder.Services.AddKeyedSingleton<OpenAIClient>(LlmCompactionClientKey, (resolver, _) =>
+        {
+            var httpClientFactory = resolver.GetRequiredService<IHttpClientFactory>();
+            var loggerFactory = resolver.GetRequiredService<ILoggerFactory>();
+            var httpClient = httpClientFactory.CreateClient(LlmCompactionHttpClient);
+            return new OpenAIClient(
+                new ApiKeyCredential(config.Llm.ApiKey),
+                new()
+                {
+                    Endpoint = config.Llm.Endpoint,
+                    NetworkTimeout = LlmCompactionRequestTimeout,
+                    Transport = new HttpClientPipelineTransport(httpClient, true, loggerFactory)
+                });
+        });
+        builder.Services.AddKeyedSingleton<IChatClient>(LlmCompactionClientKey, (resolver, serviceKey) =>
+        {
+            var openAiClient = resolver.GetRequiredKeyedService<OpenAIClient>(serviceKey);
+            var loggerFactory = resolver.GetRequiredService<ILoggerFactory>();
+            // Инструменты компактинг-клиенту не отдаём: задача чисто текстовая
+            return openAiClient.GetChatClient(config.Llm.Model)
+                .AsIChatClient()
+                .AsBuilder()
+                .UseLogging(loggerFactory)
+                .Build();
+        });
+        builder.Services.AddSingleton<IMediaDescriptionCompressor>(resolver =>
+        {
+            var compactionChatClient = resolver.GetRequiredKeyedService<IChatClient>(LlmCompactionClientKey);
+            var compressorLogger = resolver.GetRequiredService<ILogger<DefaultMediaDescriptionCompressor>>();
+            return new DefaultMediaDescriptionCompressor(compactionChatClient, compressorLogger);
+        });
+        builder.Services.AddSingleton(new DefaultMediaRecognitionQueuesOptions(
+            config.Telegram.AllowedChatIds,
+            MediaRecognitionQueueCapacityPerChat));
+        builder.Services.AddSingleton<IMediaRecognitionQueues>(resolver =>
+        {
+            var queuesOptions = resolver.GetRequiredService<DefaultMediaRecognitionQueuesOptions>();
+            var queuesLogger = resolver.GetRequiredService<ILogger<DefaultMediaRecognitionQueues>>();
+            var queues = new DefaultMediaRecognitionQueues(queuesOptions, queuesLogger);
+            var hostLifetime = resolver.GetRequiredService<IHostApplicationLifetime>();
+            hostLifetime.ApplicationStopping.Register(queues.Complete);
+            return queues;
+        });
+        builder.Services.AddSingleton(new MediaRecognitionBackgroundServiceOptions(MediaSweepInterval));
+        builder.Services.AddHostedService<MediaRecognitionBackgroundService>();
         // LLM Chat
         builder.Services.AddSingleton(new DefaultLlmChatHandlerOptions(config.Telegram.BotName, config.Llm.DefaultResponse));
         builder.Services.AddSingleton<ILlmChatHandler, DefaultLlmChatHandler>();
