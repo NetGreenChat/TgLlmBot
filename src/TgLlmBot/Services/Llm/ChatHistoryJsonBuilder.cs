@@ -6,6 +6,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.Extensions.AI;
 using TgLlmBot.DataAccess.Models;
+using TgLlmBot.Services.Media;
 
 namespace TgLlmBot.Services.Llm;
 
@@ -59,11 +60,11 @@ public static class ChatHistoryJsonBuilder
                                 {nameof(JsonHistoryMessage.FromLastName)} - Фамилия автора сообщения
                                 {nameof(JsonHistoryMessage.Text)} - текст сообщения
                                 {nameof(JsonHistoryMessage.IsLlmReplyToMessage)} - флаг, обозначающий то что это ТЫ и отправил это сообщение в ответ кому-то
-                                {nameof(JsonHistoryMessage.HasMedia)} - были ли к сообщению приложены картинки или стикеры; есть у каждого сообщения
+                                {nameof(JsonHistoryMessage.HasMedia)} - были ли к сообщению приложены вложения: картинки, стикеры, гифки, видео; есть у каждого сообщения
                                 {nameof(JsonHistoryMessage.MediaGroupId)} - Id альбома: сообщения с одинаковым значением пользователь отправил одной пачкой картинок
                                 {nameof(JsonHistoryMessage.Media)} - что именно было приложено, по одному элементу на вложение (есть, когда {nameof(JsonHistoryMessage.HasMedia)} = true):
                                   {nameof(JsonHistoryMedia.Order)} - порядковый номер вложения внутри сообщения,
-                                  {nameof(JsonHistoryMedia.Kind)} - что это (картинка, стикер, анимированный стикер),
+                                  {nameof(JsonHistoryMedia.Kind)} - что это (картинка, стикер, анимированный стикер, гифка, видео),
                                   {nameof(JsonHistoryMedia.Emoji)} - эмодзи стикера,
                                   {nameof(JsonHistoryMedia.StickerSet)} - название стикерпака,
                                   {nameof(JsonHistoryMedia.Description)} - что на этом вложении изображено, включая дословно весь текст, который на нём виден
@@ -78,7 +79,7 @@ public static class ChatHistoryJsonBuilder
         result.Add(new(ChatRole.User,
             $"При ответе на сообщение пользователя учитывай контекст обсуждений в которых он участвовал (по связке {nameof(JsonHistoryMessage.FromUserId)} + {nameof(JsonHistoryMessage.MessageId)} + {nameof(JsonHistoryMessage.ReplyToMessageId)} или по связке {nameof(JsonHistoryMessage.FromUserId)} + {nameof(JsonHistoryMessage.MessageId)} + {nameof(JsonHistoryMessage.ReplyToMessageId)} + {nameof(JsonHistoryMessage.MessageThreadId)})"));
         result.Add(new(ChatRole.User,
-            $"Картинки и стикеры из истории ты видел сам - их содержимое лежит в {nameof(JsonHistoryMessage.Media)}. Порядок сообщений в истории и {nameof(JsonHistoryMedia.Order)} внутри сообщения задают порядок, в котором их отправляли, а связка {nameof(JsonHistoryMessage.MessageId)} + {nameof(JsonHistoryMedia.Order)} однозначно говорит, какое описание к какой картинке относится. Помни, что было на присланных ранее картинках, и не путай их между собой."));
+            $"Вложения из истории ты видел сам - их содержимое лежит в {nameof(JsonHistoryMessage.Media)}. Порядок сообщений в истории и {nameof(JsonHistoryMedia.Order)} внутри сообщения задают порядок, в котором их отправляли, а связка {nameof(JsonHistoryMessage.MessageId)} + {nameof(JsonHistoryMedia.Order)} однозначно говорит, какое описание к какому вложению относится. Помни, что было на присланных ранее вложениях, и не путай их между собой."));
         return result.ToArray();
     }
 
@@ -114,7 +115,7 @@ public static class ChatHistoryJsonBuilder
         return media.Status switch
         {
             DbMediaRecognitionStatus.Pending => "Описание ещё готовится, разглядеть не успели.",
-            DbMediaRecognitionStatus.Unsupported => "Разглядеть нечего: у этого вложения нет статичной картинки.",
+            DbMediaRecognitionStatus.Unsupported => "Разглядеть нечего: показать модели этот файл не получилось.",
             _ => "Разглядеть не удалось."
         };
     }
@@ -165,12 +166,7 @@ public static class ChatHistoryJsonBuilder
 
     private static string DescribeKind(DbChatMessageMedia media)
     {
-        return media.Kind switch
-        {
-            DbMediaKind.Photo => "картинка",
-            DbMediaKind.Sticker => media.IsAnimated ? "анимированный стикер" : "стикер",
-            _ => "вложение"
-        };
+        return MediaKindNames.Describe(media.Kind, media.IsAnimated);
     }
 }
 

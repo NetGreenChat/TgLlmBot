@@ -7,12 +7,12 @@ namespace TgLlmBot.Services.Media;
 /// </summary>
 public sealed class DownloadedMedia
 {
-    public DownloadedMedia(byte[] content, string mediaType)
+    public DownloadedMedia(byte[] content, MediaFormat format)
     {
         ArgumentNullException.ThrowIfNull(content);
-        ArgumentException.ThrowIfNullOrEmpty(mediaType);
         Content = content;
-        MediaType = mediaType;
+        Format = format;
+        MediaType = MediaFormatDetector.ToMediaType(format);
     }
 
     /// <summary>
@@ -21,7 +21,12 @@ public sealed class DownloadedMedia
     public byte[] Content { get; }
 
     /// <summary>
-    ///     Media type, определённый по сигнатуре содержимого.
+    ///     Формат, определённый по сигнатуре содержимого.
+    /// </summary>
+    public MediaFormat Format { get; }
+
+    /// <summary>
+    ///     Media type, соответствующий <see cref="Format" />.
     /// </summary>
     public string MediaType { get; }
 }

@@ -3,7 +3,9 @@
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
     <UserSecretsId>TgLlmBot-99b1ff5f-a826-4365-bba6-477db696a75c</UserSecretsId>
-    <NoWarn>$(NoWarn);CA1515;CA1812;</NoWarn>
+    <!-- NU1608: OpenAI 2.13.0 стоит выше диапазона, объявленного Microsoft.Extensions.AI.OpenAI 10.9.0.
+         Пин намеренный, см. PackageReference ниже. -->
+    <NoWarn>$(NoWarn);CA1515;CA1812;NU1608;</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>
@@ -21,6 +23,14 @@
     <PackageReference Include="ModelContextProtocol" Version="2.2.0" />
     <PackageReference Include="Npgsql" Version="10.0.3" />
     <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.3" />
+    <!-- Явный пин поверх того, что тянет Microsoft.Extensions.AI.OpenAI: в OpenAI 2.12.0 JsonPatch
+         на известное свойство модели ($.messages) дописывает его в тело ещё раз, и запрос к vision
+         уезжает с удвоенным массивом сообщений - то есть с двумя копиями base64 вложения. -->
+    <PackageReference Include="OpenAI" Version="2.13.0" />
+    <PackageReference Include="SkiaSharp" Version="4.151.1" />
+    <PackageReference Include="SkiaSharp.NativeAssets.Linux.NoDependencies" Version="4.151.1" />
+    <PackageReference Include="SkiaSharp.NativeAssets.Win32" Version="4.151.1" />
+    <PackageReference Include="SkiaSharp.Skottie" Version="4.151.1" />
     <PackageReference Include="Telegram.Bot" Version="22.10.3" />
   </ItemGroup>
 

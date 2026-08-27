@@ -34,7 +34,10 @@ public partial class DefaultTelegramCommandDispatcher : ITelegramCommandDispatch
     [
         MessageType.Text,
         MessageType.Photo,
-        MessageType.Sticker
+        MessageType.Sticker,
+        MessageType.Animation,
+        MessageType.Video,
+        MessageType.VideoNote
     ];
 
     private readonly ChatWithLlmCommandHandler _chatWithLlm;
@@ -141,7 +144,7 @@ public partial class DefaultTelegramCommandDispatcher : ITelegramCommandDispatch
         // Решаем судьбу сообщения до постановки вложений в очередь: если отвечать на него будем мы,
         // описания ужмёт медиа-пайплайн перед ответом, а не фоновый воркер сразу
         var chatWithLlmCommand = TryCreateChatWithLlmCommand(message, type, self);
-        var hasSupportedMedia = storedMessage.Media.Any(static m => !string.IsNullOrEmpty(m.DownloadFileId));
+        var hasSupportedMedia = storedMessage.Media.Any(static m => m.HasShowableFile);
         var isBotOwnMessage = storedMessage.IsLlmReplyToMessage;
 
         // Регистрируем альбом даже без вложений: по этой отметке фронтовое задание понимает,
@@ -308,7 +311,7 @@ public partial class DefaultTelegramCommandDispatcher : ITelegramCommandDispatch
 
         // Сначала по самому апдейту, без похода в базу: реплаем отвечают в основном на текст,
         // и гонять из-за этого запрос на каждое сообщение незачем
-        if (!TelegramMessageMediaExtractor.Extract(replyToMessage).Any(static m => !string.IsNullOrEmpty(m.DownloadFileId)))
+        if (!TelegramMessageMediaExtractor.Extract(replyToMessage).Any(static m => m.HasShowableFile))
         {
             return false;
         }
@@ -317,7 +320,7 @@ public partial class DefaultTelegramCommandDispatcher : ITelegramCommandDispatch
             ? await SelectSingleAsync(chatId, replyToMessage.Id, cancellationToken)
             : await _messageStorage.SelectMediaGroupMessagesAsync(chatId, replyToMessage.MediaGroupId, cancellationToken);
         return rows.Any(static row => row.Media.Any(static media =>
-            media.Status is DbMediaRecognitionStatus.Pending && !string.IsNullOrEmpty(media.DownloadFileId)));
+            media.Status is DbMediaRecognitionStatus.Pending && media.HasShowableFile));
     }
 
     private async Task<DbChatMessage[]> SelectSingleAsync(long chatId, int messageId, CancellationToken cancellationToken)

@@ -1,4 +1,5 @@
 using System;
+using System.ComponentModel.DataAnnotations.Schema;
 
 namespace TgLlmBot.DataAccess.Models;
 
@@ -38,11 +39,25 @@ public class DbChatMessageMedia
     public string FileUniqueId { get; set; } = default!;
 
     /// <summary>
-    ///     Идентификатор файла, который нужно скачать, чтобы показать вложение vision-модели.
-    ///     Для анимированных и видео-стикеров это статическое превью, а не сам стикер.
+    ///     Идентификатор основного файла вложения - картинки, стикера, гифки или видео, -
+    ///     который нужно скачать, чтобы показать вложение vision-модели.
     ///     Пусто, если показывать нечего.
     /// </summary>
     public string? DownloadFileId { get; set; }
+
+    /// <summary>
+    ///     Идентификатор статического превью, которое Telegram отдаёт к стикерам, гифкам и видео.
+    ///     Подстраховка на случай, когда с основным файлом не сложилось: анимация не отрисовалась,
+    ///     формат не опознался или файл слишком большой, чтобы показывать его модели целиком.
+    /// </summary>
+    public string? ThumbnailFileId { get; set; }
+
+    /// <summary>
+    ///     Модели есть что показать: у вложения нашёлся хоть какой-то файл - свой или превью.
+    /// </summary>
+    [NotMapped]
+    public bool HasShowableFile =>
+        !string.IsNullOrEmpty(DownloadFileId) || !string.IsNullOrEmpty(ThumbnailFileId);
 
     /// <summary>
     ///     Эмодзи, которому соответствует стикер.
@@ -55,8 +70,7 @@ public class DbChatMessageMedia
     public string? SetName { get; set; }
 
     /// <summary>
-    ///     Вложение движется: анимированный (TGS) или видео (WEBM) стикер.
-    ///     Распознаётся при этом только статическое превью.
+    ///     Вложение движется: анимированный (TGS) или видео (WEBM) стикер, гифка или видео.
     /// </summary>
     public bool IsAnimated { get; set; }
 

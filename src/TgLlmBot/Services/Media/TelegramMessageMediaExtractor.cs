@@ -40,25 +40,70 @@ public static class TelegramMessageMediaExtractor
         {
             var sticker = message.Sticker;
 
-            // Статический стикер - это WEBP, его можно скормить модели как есть.
-            // Анимированный (TGS, gzip-нутый Lottie) и видео (WEBM VP9) без внешнего рендерера
-            // не развернуть, зато Telegram отдаёт к ним статическое превью - его и показываем.
-            if (!sticker.IsAnimated && !sticker.IsVideo)
+            // Статический стикер - это WEBP, его можно скормить модели как есть. Анимированный
+            // (TGS, gzip-нутый Lottie) разворачивается в кадры своими руками, видео (WEBM VP9)
+            // уходит файлом целиком - декодирует его сервер модели. Превью держим на всякий
+            // случай: если ни то, ни другое не выйдет, модель увидит хотя бы один кадр.
+            result.Add(new()
             {
-                result.Add(new()
-                {
-                    Order = result.Count + 1,
-                    Kind = DbMediaKind.Sticker,
-                    // Идентификатор именно стикера, а не превью: кэш описаний должен склеивать
-                    // один и тот же стикер независимо от того, что мы в итоге скачали
-                    FileUniqueId = sticker.FileUniqueId,
-                    DownloadFileId = sticker.FileId,
-                    Emoji = sticker.Emoji,
-                    SetName = sticker.SetName,
-                    IsAnimated = false,
-                    Status = DbMediaRecognitionStatus.Pending
-                });
-            }
+                Order = result.Count + 1,
+                Kind = DbMediaKind.Sticker,
+                // Идентификатор именно стикера, а не превью: кэш описаний должен склеивать
+                // один и тот же стикер независимо от того, что мы в итоге скачали
+                FileUniqueId = sticker.FileUniqueId,
+                DownloadFileId = sticker.FileId,
+                ThumbnailFileId = sticker.Thumbnail?.FileId,
+                Emoji = sticker.Emoji,
+                SetName = sticker.SetName,
+                IsAnimated = sticker.IsAnimated || sticker.IsVideo,
+                Status = DbMediaRecognitionStatus.Pending
+            });
+        }
+
+        if (message.Animation is not null)
+        {
+            var animation = message.Animation;
+            result.Add(new()
+            {
+                Order = result.Count + 1,
+                Kind = DbMediaKind.Animation,
+                FileUniqueId = animation.FileUniqueId,
+                DownloadFileId = animation.FileId,
+                ThumbnailFileId = animation.Thumbnail?.FileId,
+                IsAnimated = true,
+                Status = DbMediaRecognitionStatus.Pending
+            });
+        }
+
+        if (message.Video is not null)
+        {
+            var video = message.Video;
+            result.Add(new()
+            {
+                Order = result.Count + 1,
+                Kind = DbMediaKind.Video,
+                FileUniqueId = video.FileUniqueId,
+                DownloadFileId = video.FileId,
+                ThumbnailFileId = video.Thumbnail?.FileId,
+                IsAnimated = true,
+                Status = DbMediaRecognitionStatus.Pending
+            });
+        }
+
+        if (message.VideoNote is not null)
+        {
+            // Круглое видеосообщение: для истории чата это такое же видео, только без подписи
+            var videoNote = message.VideoNote;
+            result.Add(new()
+            {
+                Order = result.Count + 1,
+                Kind = DbMediaKind.Video,
+                FileUniqueId = videoNote.FileUniqueId,
+                DownloadFileId = videoNote.FileId,
+                ThumbnailFileId = videoNote.Thumbnail?.FileId,
+                IsAnimated = true,
+                Status = DbMediaRecognitionStatus.Pending
+            });
         }
 
         return result.ToArray();

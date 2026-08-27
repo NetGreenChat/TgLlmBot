@@ -17,6 +17,7 @@ public class DbChatMessageMediaEntityTypeConfiguration : IEntityTypeConfiguratio
             .HasDefaultValueSql("uuidv7()");
         builder.Property(x => x.FileUniqueId).HasMaxLength(64).IsRequired();
         builder.Property(x => x.DownloadFileId).HasMaxLength(256);
+        builder.Property(x => x.ThumbnailFileId).HasMaxLength(256);
         builder.Property(x => x.Emoji).HasMaxLength(32);
         builder.Property(x => x.SetName).HasMaxLength(128);
         // Сжатое описание ограничено по построению, поэтому обычная varchar с запасом

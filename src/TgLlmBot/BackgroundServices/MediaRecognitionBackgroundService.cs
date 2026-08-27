@@ -34,9 +34,9 @@ namespace TgLlmBot.BackgroundServices;
 public partial class MediaRecognitionBackgroundService : BackgroundService
 {
     private readonly IMediaDescriptionCache _descriptionCache;
-    private readonly ITelegramMediaDownloader _downloader;
+    private readonly IMediaPreparer _preparer;
     private readonly IMediaGroupTracker _mediaGroupTracker;
-    private readonly IImageRecognizer _imageRecognizer;
+    private readonly IMediaRecognizer _mediaRecognizer;
     private readonly ILogger<MediaRecognitionBackgroundService> _logger;
     private readonly ILlmRequestQueues _llmRequestQueues;
     private readonly MediaRecognitionBackgroundServiceOptions _options;
@@ -56,8 +56,8 @@ public partial class MediaRecognitionBackgroundService : BackgroundService
         MediaRecognitionBackgroundServiceOptions options,
         TimeProvider timeProvider,
         IMediaRecognitionQueues queues,
-        ITelegramMediaDownloader downloader,
-        IImageRecognizer imageRecognizer,
+        IMediaPreparer preparer,
+        IMediaRecognizer mediaRecognizer,
         IMediaDescriptionCompressor compressor,
         IMediaDescriptionCache descriptionCache,
         ITelegramMessageStorage storage,
@@ -69,8 +69,8 @@ public partial class MediaRecognitionBackgroundService : BackgroundService
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(timeProvider);
         ArgumentNullException.ThrowIfNull(queues);
-        ArgumentNullException.ThrowIfNull(downloader);
-        ArgumentNullException.ThrowIfNull(imageRecognizer);
+        ArgumentNullException.ThrowIfNull(preparer);
+        ArgumentNullException.ThrowIfNull(mediaRecognizer);
         ArgumentNullException.ThrowIfNull(compressor);
         ArgumentNullException.ThrowIfNull(descriptionCache);
         ArgumentNullException.ThrowIfNull(storage);
@@ -81,8 +81,8 @@ public partial class MediaRecognitionBackgroundService : BackgroundService
         _options = options;
         _timeProvider = timeProvider;
         _queues = queues;
-        _downloader = downloader;
-        _imageRecognizer = imageRecognizer;
+        _preparer = preparer;
+        _mediaRecognizer = mediaRecognizer;
         _compressor = compressor;
         _descriptionCache = descriptionCache;
         _storage = storage;
@@ -444,53 +444,95 @@ public partial class MediaRecognitionBackgroundService : BackgroundService
             return null;
         }
 
-        if (string.IsNullOrEmpty(media.DownloadFileId))
+        if (!media.HasShowableFile)
         {
-            // Показать модели нечего: например, анимированный стикер без превью
+            // Показать модели нечего: у вложения нет ни своего файла, ни превью
             media.Status = DbMediaRecognitionStatus.Unsupported;
             return null;
         }
 
-        string? description = null;
         // Кэш описаний - только для стикеров: они прилетают в чат одни и те же по многу раз,
-        // а фото дешевле распознать заново, чем хранить их описания вечно
+        // а картинки, гифки и видео дешевле распознать заново, чем хранить их описания вечно
+        CachedMediaDescription? cached = null;
         if (media.Kind is DbMediaKind.Sticker)
         {
-            var cached = await _descriptionCache.TryGetAsync(media.FileUniqueId, cancellationToken);
-            if (!cached.IsFailed)
-            {
-                Log.DescriptionServedFromCache(_logger, media.FileUniqueId);
-                description = cached.Value;
-            }
+            var lookup = await _descriptionCache.TryGetAsync(media.FileUniqueId, cancellationToken);
+            cached = lookup.IsFailed ? null : lookup.Value;
         }
 
-        if (description is null)
+        // Описание, снятое с самого стикера, окончательно: лучше него уже не будет
+        if (cached is { IsFallback: false })
         {
-            var downloaded = await _downloader.DownloadAsync(media.DownloadFileId, cancellationToken);
-            if (downloaded.IsFailed)
-            {
-                media.Status = DbMediaRecognitionStatus.Failed;
-                return null;
-            }
+            Log.DescriptionServedFromCache(_logger, media.FileUniqueId);
+            return cached.Description;
+        }
 
-            var request = new ImageRecognitionRequest(
-                downloaded.Value.Content,
-                downloaded.Value.MediaType,
-                media.Kind,
-                media.IsAnimated,
-                relatedText);
-            var recognized = await _imageRecognizer.DescribeAsync(request, cancellationToken);
-            if (recognized.IsFailed)
-            {
-                media.Status = DbMediaRecognitionStatus.Failed;
-                return null;
-            }
+        var description = await DescribeWithVisionAsync(media, relatedText, cached is not null, cancellationToken);
+        if (description is not null)
+        {
+            return description;
+        }
 
-            description = Truncate(recognized.Value, MediaDescriptionLimits.FullMaxLength);
-            if (media.Kind is DbMediaKind.Sticker)
-            {
-                await _descriptionCache.StoreAsync(media.FileUniqueId, description, cancellationToken);
-            }
+        if (cached is not null)
+        {
+            // Разглядеть заново не вышло: описание с превью хуже, чем хотелось бы, но лучше, чем ничего
+            Log.DescriptionServedFromCache(_logger, media.FileUniqueId);
+            return cached.Description;
+        }
+
+        media.Status = DbMediaRecognitionStatus.Failed;
+        return null;
+    }
+
+    /// <summary>
+    ///     Разглядывает вложение vision-моделью и возвращает подробное описание либо
+    ///     <see langword="null" />, если ничего нового получить не удалось.
+    /// </summary>
+    /// <param name="media">Вложение из истории чата.</param>
+    /// <param name="relatedText">Текст, с которым вложение пришло в чат.</param>
+    /// <param name="hasFallbackInCache">
+    ///     В кэше уже лежит описание, снятое со статического превью. Тогда прогонять через модель
+    ///     то же самое превью второй раз незачем - разве что в этот раз дошло дело до самого файла.
+    /// </param>
+    /// <param name="cancellationToken">Токен отмены операции.</param>
+    private async Task<string?> DescribeWithVisionAsync(
+        DbChatMessageMedia media,
+        string? relatedText,
+        bool hasFallbackInCache,
+        CancellationToken cancellationToken)
+    {
+        // Скачиванием, опознанием формата и отрисовкой анимации занимается подготовщик:
+        // здесь важно только то, что в итоге показывать модели уже можно
+        var prepared = await _preparer.PrepareAsync(media, cancellationToken);
+        if (prepared.IsFailed)
+        {
+            return null;
+        }
+
+        if (hasFallbackInCache && prepared.Value.IsThumbnailFallback)
+        {
+            return null;
+        }
+
+        var request = new MediaRecognitionRequest(
+            prepared.Value,
+            media.Kind,
+            media.IsAnimated,
+            relatedText);
+        var recognized = await _mediaRecognizer.DescribeAsync(request, cancellationToken);
+        if (recognized.IsFailed)
+        {
+            return null;
+        }
+
+        var description = Truncate(recognized.Value, MediaDescriptionLimits.FullMaxLength);
+        if (media.Kind is DbMediaKind.Sticker)
+        {
+            await _descriptionCache.StoreAsync(
+                media.FileUniqueId,
+                description,
+                prepared.Value.IsThumbnailFallback,
+                cancellationToken);
         }
 
         return description;

@@ -7,7 +7,6 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
-using TgLlmBot.DataAccess.Models;
 using TgLlmBot.Models;
 using TgLlmBot.Services.Media;
 
@@ -102,12 +101,7 @@ public partial class DefaultMediaDescriptionCompressor : IMediaDescriptionCompre
 
     private static string BuildUserPrompt(MediaCompressionRequest request)
     {
-        var kind = request.Kind switch
-        {
-            DbMediaKind.Sticker when request.IsAnimated => "анимированного стикера",
-            DbMediaKind.Sticker => "стикера",
-            _ => "картинки"
-        };
+        var kind = MediaKindNames.DescribeGenitive(request.Kind, request.IsAnimated);
         var builder = new StringBuilder()
             .Append("Вот подробное описание ")
             .Append(kind)

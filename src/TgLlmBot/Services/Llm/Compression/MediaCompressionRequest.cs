@@ -29,12 +29,12 @@ public sealed class MediaCompressionRequest
     public string FullDescription { get; }
 
     /// <summary>
-    ///     Чем вложение было в чате: картинкой или стикером.
+    ///     Чем вложение было в чате: картинкой, стикером, гифкой или видео.
     /// </summary>
     public DbMediaKind Kind { get; }
 
     /// <summary>
-    ///     Вложение - статический кадр анимированного или видео-стикера.
+    ///     Вложение движется.
     /// </summary>
     public bool IsAnimated { get; }
 

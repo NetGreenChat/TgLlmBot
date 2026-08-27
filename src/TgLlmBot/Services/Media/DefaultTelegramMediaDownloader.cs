@@ -13,6 +13,7 @@ public partial class DefaultTelegramMediaDownloader : ITelegramMediaDownloader
 {
     /// <summary>
     ///     Bot API отдаёт файлы не больше 20 МБ, но верить этому на слово, читая ответ в память, не стоит.
+    ///     Всё, что крупнее, Telegram и так не отдаст - такое вложение уедет в модель превью.
     /// </summary>
     private const int MaxFileSizeBytes = 20 * 1024 * 1024;
 
@@ -48,6 +49,8 @@ public partial class DefaultTelegramMediaDownloader : ITelegramMediaDownloader
                 return Result<DownloadedMedia>.Fail();
             }
 
+            // Размер проверяем по метаданным, до самой загрузки: тащить в память то,
+            // что модели всё равно не отправишь, незачем
             if (file.FileSize > MaxFileSizeBytes)
             {
                 Log.FileTooLarge(_logger, fileId, file.FileSize.Value, MaxFileSizeBytes);
@@ -61,15 +64,15 @@ public partial class DefaultTelegramMediaDownloader : ITelegramMediaDownloader
                 content = memoryStream.ToArray();
             }
 
-            var mediaType = ImageFormatDetector.DetectMediaType(content);
-            if (mediaType is null)
+            var format = MediaFormatDetector.Detect(content);
+            if (format is null)
             {
                 Log.UnsupportedFormat(_logger, fileId, content.Length);
                 return Result<DownloadedMedia>.Fail();
             }
 
-            Log.FileDownloaded(_logger, fileId, content.Length, mediaType);
-            return Result<DownloadedMedia>.Success(new(content, mediaType));
+            Log.FileDownloaded(_logger, fileId, content.Length, format.Value);
+            return Result<DownloadedMedia>.Success(new(content, format.Value));
         }
         catch (Exception ex)
         {
@@ -80,8 +83,8 @@ public partial class DefaultTelegramMediaDownloader : ITelegramMediaDownloader
 
     private static partial class Log
     {
-        [LoggerMessage(Level = LogLevel.Debug, Message = "Downloaded Telegram file {FileId}: {ContentLength} bytes of {MediaType}")]
-        public static partial void FileDownloaded(ILogger logger, string fileId, int contentLength, string mediaType);
+        [LoggerMessage(Level = LogLevel.Debug, Message = "Downloaded Telegram file {FileId}: {ContentLength} bytes of {Format}")]
+        public static partial void FileDownloaded(ILogger logger, string fileId, int contentLength, MediaFormat format);
 
         [LoggerMessage(Level = LogLevel.Warning, Message = "Telegram returned no downloadable path for file {FileId}")]
         public static partial void FileMetadataMissing(ILogger logger, string fileId);
@@ -89,7 +92,7 @@ public partial class DefaultTelegramMediaDownloader : ITelegramMediaDownloader
         [LoggerMessage(Level = LogLevel.Warning, Message = "Telegram file {FileId} of {FileSize} bytes exceeds the limit of {MaxFileSize} bytes")]
         public static partial void FileTooLarge(ILogger logger, string fileId, long fileSize, int maxFileSize);
 
-        [LoggerMessage(Level = LogLevel.Warning, Message = "Telegram file {FileId} of {ContentLength} bytes is not an image the vision model can open")]
+        [LoggerMessage(Level = LogLevel.Warning, Message = "Telegram file {FileId} of {ContentLength} bytes is of a format the vision model cannot open")]
         public static partial void UnsupportedFormat(ILogger logger, string fileId, int contentLength);
 
         [LoggerMessage(Level = LogLevel.Error, Message = "Failed to download Telegram file {FileId}")]

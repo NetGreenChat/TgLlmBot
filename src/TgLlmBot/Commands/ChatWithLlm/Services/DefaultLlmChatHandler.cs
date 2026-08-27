@@ -18,6 +18,7 @@ using TgLlmBot.Services.DataAccess.SystemPrompts;
 using TgLlmBot.Services.DataAccess.TelegramMessages;
 using TgLlmBot.Services.Llm;
 using TgLlmBot.Services.Mcp.Tools;
+using TgLlmBot.Services.Media;
 using TgLlmBot.Services.Resources;
 using TgLlmBot.Services.Telegram.Markdown;
 using TgLlmBot.Services.Telegram.TypingStatus;
@@ -385,7 +386,7 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
         foreach (var attachment in attachments)
         {
             builder
-                .Append("<image_description order=\"")
+                .Append("<media_description order=\"")
                 .Append(attachment.Order.ToString(CultureInfo.InvariantCulture))
                 .Append("\" message_id=\"")
                 .Append(attachment.MessageId.ToString(CultureInfo.InvariantCulture))
@@ -396,7 +397,7 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
             builder
                 .AppendLine(">")
                 .AppendLine(ChatHistoryJsonBuilder.DescribeMedia(attachment.Media))
-                .AppendLine("</image_description>");
+                .AppendLine("</media_description>");
         }
     }
 
@@ -422,29 +423,20 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
 
     private static string DescribeKind(DbChatMessageMedia media)
     {
-        return media.Kind switch
-        {
-            DbMediaKind.Photo => "картинка",
-            DbMediaKind.Sticker => media.IsAnimated ? "анимированный стикер" : "стикер",
-            _ => "вложение"
-        };
+        return MediaKindNames.Describe(media.Kind, media.IsAnimated);
     }
 
     /// <summary>
-    ///     "картинку", "3 картинки", "5 стикеров", "4 вложения" - то, что подставляется
+    ///     "картинку", "3 картинки", "5 гифок", "4 вложения" - то, что подставляется
     ///     в фразу "сообщение содержит ...".
     /// </summary>
     private static string DescribeAttachmentsCount(IReadOnlyList<PromptAttachment> attachments)
     {
         var count = attachments.Count;
-        var allPhotos = attachments.All(x => x.Media.Kind is DbMediaKind.Photo);
-        var allStickers = attachments.All(x => x.Media.Kind is DbMediaKind.Sticker);
-        var (one, few, many) = (allPhotos, allStickers) switch
-        {
-            (true, _) => ("картинку", "картинки", "картинок"),
-            (_, true) => ("стикер", "стикера", "стикеров"),
-            _ => ("вложение", "вложения", "вложений")
-        };
+        // Альбом в Telegram может смешивать картинки и видео: для разнородной пачки
+        // остаётся нейтральное "вложение"
+        var kinds = attachments.Select(static x => x.Media.Kind).Distinct().ToArray();
+        var (one, few, many) = MediaKindNames.DescribeCountable(kinds.Length is 1 ? kinds[0] : null);
         if (count is 1)
         {
             return one;
@@ -473,7 +465,7 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
 
                           Для общения используется Markdown.
 
-                          Сам ты картинки и стикеры не видишь: их за тебя разглядывает отдельная vision-модель, а тебе приходит её текстовое описание - в блоках <image_description> для текущего сообщения и в поле Media у сообщений из истории чата. Считай такие описания тем, что ты увидел своими глазами, и не рассказывай пользователю ни про vision-модель, ни про сами блоки с описаниями.
+                          Сам ты картинки, стикеры, гифки и видео не видишь: их за тебя разглядывает отдельная vision-модель, а тебе приходит её текстовое описание - в блоках <media_description> для текущего сообщения и в поле Media у сообщений из истории чата. Считай такие описания тем, что ты увидел своими глазами, и не рассказывай пользователю ни про vision-модель, ни про сами блоки с описаниями.
                           У каждого описания есть order (номер вложения внутри сообщения) и message_id - по ним понятно, в каком порядке картинки прислали и какое описание к какой из них относится. Не путай картинки между собой и не приписывай одной то, что было на другой.
                           Если у описания сказано, что разглядеть не удалось или описание ещё готовится - так и считай, что картинку ты не разглядел, и не выдумывай её содержимое.
 

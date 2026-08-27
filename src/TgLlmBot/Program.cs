@@ -290,15 +290,19 @@ public partial class Program
                 .UseLogging(loggerFactory)
                 .Build();
         });
-        builder.Services.AddSingleton<IImageRecognizer>(resolver =>
+        builder.Services.AddSingleton<IMediaRecognizer>(resolver =>
         {
             var visionChatClient = resolver.GetRequiredKeyedService<IChatClient>(LlmVisionClientKey);
-            var recognizerLogger = resolver.GetRequiredService<ILogger<DefaultImageRecognizer>>();
-            return new DefaultImageRecognizer(visionChatClient, recognizerLogger);
+            var recognizerLogger = resolver.GetRequiredService<ILogger<DefaultMediaRecognizer>>();
+            return new DefaultMediaRecognizer(visionChatClient, recognizerLogger);
         });
         // Распознавание вложений: отдельные от LLM-запросов per-chat очереди, потому что описывать
         // надо все картинки чата, а не только те, что пришли вместе с обращением к боту
         builder.Services.AddSingleton<ITelegramMediaDownloader, DefaultTelegramMediaDownloader>();
+        // Анимированные стикеры (TGS) не откроет ни один декодер видео - их кадры рисуются на месте,
+        // остальное подготовщик отдаёт модели как есть
+        builder.Services.AddSingleton<IAnimatedStickerRenderer, DefaultAnimatedStickerRenderer>();
+        builder.Services.AddSingleton<IMediaPreparer, DefaultMediaPreparer>();
         builder.Services.AddSingleton<IMediaDescriptionCache, DefaultMediaDescriptionCache>();
         builder.Services.AddSingleton<IMediaGroupTracker, DefaultMediaGroupTracker>();
         // Ужимает подробные описания до размера истории - уже основной моделью, а не vision:
