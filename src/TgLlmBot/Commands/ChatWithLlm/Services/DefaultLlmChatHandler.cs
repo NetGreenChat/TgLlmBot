@@ -116,7 +116,7 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
             var chatOptions = new ChatOptions
             {
                 ConversationId = Guid.NewGuid().ToString("N"),
-                Tools = [..tools],
+                Tools = [.. tools],
                 MaxOutputTokens = 81920,
                 AllowMultipleToolCalls = true,
                 ToolMode = new AutoChatToolMode(),
@@ -479,7 +479,7 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
                           Постарайся не упоминать прошлые сообщения в своих ответах. Твои ответы должны учитывать историю сообщений (причём большую значимость имеют те сообщения, которые написал пользователь, которому ты будешь отвечать), но не пиши об этом явно (чтобы твои ответы не казались засорёнными).
                           Поменьше фоллоуапов (follow up) и вопросов в конце твоих ответов.
                           Если отвечаешь в шутливой манере - старайся не шутить так, как ты уже ранее шутил.
-                          При ответе отвечай кратко, не надо лапши на тысячи слов: её никто не читает.
+                          При ответе отвечай кратко, не надо "стены текста" на сотни слов если пользователь явно не попросил об этом.
 
                           Текущая дата и время по UTC: `{formattedDate}`
 
