@@ -12,6 +12,7 @@ using Npgsql;
 using Telegram.Bot.Types;
 using TgLlmBot.DataAccess;
 using TgLlmBot.DataAccess.Models;
+using TgLlmBot.Services.Llm;
 using TgLlmBot.Services.Media;
 using TgLlmBot.Utils;
 
@@ -50,7 +51,9 @@ public class DefaultTelegramMessageStorage : ITelegramMessageStorage
                                                    "{nameof(DbChatMessage.Text)}",
                                                    "{nameof(DbChatMessage.Caption)}",
                                                    "{nameof(DbChatMessage.IsLlmReplyToMessage)}",
-                                                   "{nameof(DbChatMessage.MediaGroupId)}"
+                                                   "{nameof(DbChatMessage.MediaGroupId)}",
+                                                   "{nameof(DbChatMessage.CustomPromptScope)}",
+                                                   "{nameof(DbChatMessage.CustomPromptUserId)}"
                                                """;
 
     private readonly IServiceScopeFactory _serviceScopeFactory;
@@ -61,8 +64,17 @@ public class DefaultTelegramMessageStorage : ITelegramMessageStorage
         _serviceScopeFactory = serviceScopeFactory;
     }
 
+    public Task<DbChatMessage> StoreMessageAsync(Message message, User self, CancellationToken cancellationToken)
+    {
+        return StoreMessageAsync(message, self, AppliedCustomPrompt.None, cancellationToken);
+    }
+
     [SuppressMessage("ReSharper", "ConvertToUsingDeclaration")]
-    public async Task<DbChatMessage> StoreMessageAsync(Message message, User self, CancellationToken cancellationToken)
+    public async Task<DbChatMessage> StoreMessageAsync(
+        Message message,
+        User self,
+        AppliedCustomPrompt customPrompt,
+        CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         await using (var asyncScope = _serviceScopeFactory.CreateAsyncScope())
@@ -70,7 +82,7 @@ public class DefaultTelegramMessageStorage : ITelegramMessageStorage
             var dbContext = asyncScope.ServiceProvider.GetRequiredService<BotDbContext>();
             await using (var transaction = await dbContext.Database.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken))
             {
-                var dbChatMessage = CreateDbChatMessage(message, self);
+                var dbChatMessage = CreateDbChatMessage(message, self, customPrompt);
                 // Вложения уезжают в базу вместе с сообщением: внешний ключ EF проставит сам
                 dbContext.ChatHistory.Add(dbChatMessage);
                 await dbContext.SaveChangesAsync(cancellationToken);
@@ -298,10 +310,11 @@ public class DefaultTelegramMessageStorage : ITelegramMessageStorage
         }
     }
 
-    private static DbChatMessage CreateDbChatMessage(Message message, User self)
+    private static DbChatMessage CreateDbChatMessage(Message message, User self, AppliedCustomPrompt customPrompt)
     {
         ArgumentNullException.ThrowIfNull(message);
         ArgumentNullException.ThrowIfNull(self);
+        ArgumentNullException.ThrowIfNull(customPrompt);
         var isSelfMessage = self.Id == message.From?.Id;
         var dbChatMessage = new DbChatMessage(
             message.Id,
@@ -316,7 +329,9 @@ public class DefaultTelegramMessageStorage : ITelegramMessageStorage
             SurrogatePairSanitizer.SanitizeInvalidUtf16(message.Text),
             SurrogatePairSanitizer.SanitizeInvalidUtf16(message.Caption),
             isSelfMessage,
-            message.MediaGroupId);
+            message.MediaGroupId,
+            customPrompt.Scope,
+            customPrompt.UserId);
         foreach (var media in TelegramMessageMediaExtractor.Extract(message))
         {
             dbChatMessage.Media.Add(media);

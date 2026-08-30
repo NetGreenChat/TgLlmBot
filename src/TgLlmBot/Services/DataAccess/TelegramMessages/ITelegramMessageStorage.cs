@@ -3,6 +3,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Telegram.Bot.Types;
 using TgLlmBot.DataAccess.Models;
+using TgLlmBot.Services.Llm;
 
 namespace TgLlmBot.Services.DataAccess.TelegramMessages;
 
@@ -12,10 +13,30 @@ public interface ITelegramMessageStorage
     ///     Сохраняет сообщение вместе с метаданными его вложений (в состоянии
     ///     <see cref="DbMediaRecognitionStatus.Pending" /> - распознавание идёт отдельно и позже).
     /// </summary>
+    /// <remarks>
+    ///     Сообщение помечается как написанное без дополнительных просьб к системному промпту:
+    ///     это верно и для сообщений пользователей, и для служебных ответов команд.
+    /// </remarks>
     /// <returns>Сохранённая строка истории.</returns>
     Task<DbChatMessage> StoreMessageAsync(
         Message message,
         User self,
+        CancellationToken cancellationToken);
+
+    /// <summary>
+    ///     Сохраняет ответ бота вместе с пометкой о том, под какой дополнительной просьбой
+    ///     к системному промпту он был сгенерирован.
+    /// </summary>
+    /// <remarks>
+    ///     Пометка нужна, чтобы разовая стилевая просьба одного пользователя не растекалась через
+    ///     историю чата на ответы остальным: читая историю, модель по ней отличает свои ответы
+    ///     под чужой просьбой от ответов в обычном стиле.
+    /// </remarks>
+    /// <returns>Сохранённая строка истории.</returns>
+    Task<DbChatMessage> StoreMessageAsync(
+        Message message,
+        User self,
+        AppliedCustomPrompt customPrompt,
         CancellationToken cancellationToken);
 
     /// <summary>

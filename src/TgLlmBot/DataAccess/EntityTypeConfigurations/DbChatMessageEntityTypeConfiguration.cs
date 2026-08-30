@@ -20,6 +20,8 @@ public class DbChatMessageEntityTypeConfiguration : IEntityTypeConfiguration<DbC
         builder.Property(x => x.Text).HasMaxLength(4096);
         builder.Property(x => x.Caption).HasMaxLength(4096);
         builder.Property(x => x.MediaGroupId).HasMaxLength(64);
+        // Перечисление строкой - как и у вложений: в базу чаще смотрят глазами, чем джойнят по ней
+        builder.Property(x => x.CustomPromptScope).HasConversion<string>().HasMaxLength(32).IsRequired();
 
         // Индекс для CTE target_message (MessageId, ChatId)
         builder.HasIndex(e => new

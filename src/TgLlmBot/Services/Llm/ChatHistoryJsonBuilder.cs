@@ -28,13 +28,22 @@ public static class ChatHistoryJsonBuilder
     ///     завершающие инструкции.
     /// </summary>
     /// <param name="contextMessages">Сообщения истории в хронологическом порядке.</param>
+    /// <param name="currentPrompt">
+    ///     Дополнительная просьба, под которой формируется текущий ответ. От неё зависит правило
+    ///     обращения со стилем прошлых ответов бота: чужую разовую стилистику из истории
+    ///     перенимать нельзя ни при каком её значении.
+    /// </param>
     /// <param name="excludedMessageIds">
     ///     Идентификаторы сообщений, которые в историю попадать не должны (например, части альбома,
     ///     на который бот отвечает прямо сейчас: их вложения и так уедут в запрос отдельно).
     /// </param>
-    public static ChatMessage[] BuildContext(DbChatMessage[] contextMessages, HashSet<int>? excludedMessageIds = null)
+    public static ChatMessage[] BuildContext(
+        DbChatMessage[] contextMessages,
+        AppliedCustomPrompt currentPrompt,
+        HashSet<int>? excludedMessageIds = null)
     {
         ArgumentNullException.ThrowIfNull(contextMessages);
+        ArgumentNullException.ThrowIfNull(currentPrompt);
         if (contextMessages.Length is 0)
         {
             return [];
@@ -60,6 +69,8 @@ public static class ChatHistoryJsonBuilder
                                 {nameof(JsonHistoryMessage.FromLastName)} - Фамилия автора сообщения
                                 {nameof(JsonHistoryMessage.Text)} - текст сообщения
                                 {nameof(JsonHistoryMessage.IsLlmReplyToMessage)} - флаг, обозначающий то что это ТЫ и отправил это сообщение в ответ кому-то
+                                {nameof(JsonHistoryMessage.CustomPromptScope)} - бывает только у ТВОИХ ответов и означает, что этот ответ ты писал под дополнительной разовой просьбой о стиле, языке, формате или роли, которую подмешали в системный промпт ради одного этого ответа: "{nameof(DbCustomPromptScope.Personal)}" - персональная просьба одного пользователя, "{nameof(DbCustomPromptScope.Chat)}" - просьба, заданная на весь чат. Если поля нет - сообщение написано в твоём обычном стиле
+                                {nameof(JsonHistoryMessage.CustomPromptUserId)} - {nameof(JsonHistoryMessage.FromUserId)} того, чья персональная просьба тогда действовала
                                 {nameof(JsonHistoryMessage.HasMedia)} - были ли к сообщению приложены вложения: картинки, стикеры, гифки, видео; есть у каждого сообщения
                                 {nameof(JsonHistoryMessage.MediaGroupId)} - Id альбома: сообщения с одинаковым значением пользователь отправил одной пачкой картинок
                                 {nameof(JsonHistoryMessage.Media)} - что именно было приложено, по одному элементу на вложение (есть, когда {nameof(JsonHistoryMessage.HasMedia)} = true):
@@ -80,7 +91,27 @@ public static class ChatHistoryJsonBuilder
             $"При ответе на сообщение пользователя учитывай контекст обсуждений в которых он участвовал (по связке {nameof(JsonHistoryMessage.FromUserId)} + {nameof(JsonHistoryMessage.MessageId)} + {nameof(JsonHistoryMessage.ReplyToMessageId)} или по связке {nameof(JsonHistoryMessage.FromUserId)} + {nameof(JsonHistoryMessage.MessageId)} + {nameof(JsonHistoryMessage.ReplyToMessageId)} + {nameof(JsonHistoryMessage.MessageThreadId)})"));
         result.Add(new(ChatRole.User,
             $"Вложения из истории ты видел сам - их содержимое лежит в {nameof(JsonHistoryMessage.Media)}. Порядок сообщений в истории и {nameof(JsonHistoryMedia.Order)} внутри сообщения задают порядок, в котором их отправляли, а связка {nameof(JsonHistoryMessage.MessageId)} + {nameof(JsonHistoryMedia.Order)} однозначно говорит, какое описание к какому вложению относится. Помни, что было на присланных ранее вложениях, и не путай их между собой."));
+        result.Add(new(ChatRole.User, BuildStyleIsolationInstruction(currentPrompt)));
         return result.ToArray();
+    }
+
+    /// <summary>
+    ///     Правило обращения со стилем прошлых ответов бота: манера ответа, написанного под чужой
+    ///     разовой просьбой, на следующие ответы не распространяется.
+    /// </summary>
+    private static string BuildStyleIsolationInstruction(AppliedCustomPrompt currentPrompt)
+    {
+        var common =
+            $"Сообщения с {nameof(JsonHistoryMessage.CustomPromptScope)} - это твои ответы под разовой дополнительной просьбой, а не твой обычный голос. Их стиль (язык, манера, роль, формат, обращения) принадлежит только той просьбе и на другие ответы не распространяется. Факты и смысл из них учитывай наравне с остальной историей, стиль - нет.";
+        return currentPrompt.Scope switch
+        {
+            DbCustomPromptScope.Personal =>
+                $"{common} Сейчас действует персональная просьба пользователя с {nameof(JsonHistoryMessage.FromUserId)}={currentPrompt.UserId} (её текст в системном промпте) - следуй только ей, а стиль ответов с любой другой пометкой {nameof(JsonHistoryMessage.CustomPromptScope)} или вовсе без неё не копируй.",
+            DbCustomPromptScope.Chat =>
+                $"{common} Сейчас действует просьба, заданная на весь чат (её текст в системном промпте) - следуй только ей, а стиль ответов с пометкой \"{nameof(DbCustomPromptScope.Personal)}\" не копируй.",
+            _ =>
+                $"{common} Сейчас никакой дополнительной просьбы нет: отвечай в своём обычном стиле, даже если ближайшие твои ответы в истории помечены {nameof(JsonHistoryMessage.CustomPromptScope)}."
+        };
     }
 
     /// <summary>
@@ -140,10 +171,26 @@ public static class ChatHistoryJsonBuilder
                 x.FromLastName?.Trim(),
                 (x.Text ?? x.Caption)?.Trim(),
                 x.IsLlmReplyToMessage,
+                DescribeCustomPromptScope(x.CustomPromptScope),
+                x.CustomPromptScope is DbCustomPromptScope.Personal ? x.CustomPromptUserId : null,
                 x.Media.Count > 0,
                 x.MediaGroupId,
                 BuildHistoryMedia(x)))
             .ToArray();
+    }
+
+    /// <summary>
+    ///     Пометку пишем только там, где она есть: у сообщений без дополнительной просьбы
+    ///     (а это почти вся история) поле не сериализуется вовсе.
+    /// </summary>
+    private static string? DescribeCustomPromptScope(DbCustomPromptScope scope)
+    {
+        return scope switch
+        {
+            DbCustomPromptScope.Chat => nameof(DbCustomPromptScope.Chat),
+            DbCustomPromptScope.Personal => nameof(DbCustomPromptScope.Personal),
+            _ => null
+        };
     }
 
     private static JsonHistoryMedia[]? BuildHistoryMedia(DbChatMessage message)
@@ -206,6 +253,8 @@ public sealed class JsonHistoryMessage
         string? fromLastName,
         string? text,
         bool isLlmReplyToMessage,
+        string? customPromptScope,
+        long? customPromptUserId,
         bool hasMedia,
         string? mediaGroupId,
         JsonHistoryMedia[]? media)
@@ -220,6 +269,8 @@ public sealed class JsonHistoryMessage
         FromLastName = fromLastName;
         Text = text;
         IsLlmReplyToMessage = isLlmReplyToMessage;
+        CustomPromptScope = customPromptScope;
+        CustomPromptUserId = customPromptUserId;
         HasMedia = hasMedia;
         MediaGroupId = mediaGroupId;
         Media = media;
@@ -235,6 +286,17 @@ public sealed class JsonHistoryMessage
     public string? FromLastName { get; }
     public string? Text { get; }
     public bool IsLlmReplyToMessage { get; }
+
+    /// <summary>
+    ///     Пометка о дополнительной просьбе, под которой бот писал этот ответ. Пишется только
+    ///     у таких ответов: у остальных сообщений поля в JSON нет, и это читается как
+    ///     "обычный стиль".
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? CustomPromptScope { get; }
+
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public long? CustomPromptUserId { get; }
 
     /// <summary>
     ///     Пишется у каждого сообщения, в том числе <see langword="false" />: модель должна

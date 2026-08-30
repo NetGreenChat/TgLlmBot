@@ -22,7 +22,9 @@ public class DbChatMessage
         string? text,
         string? caption,
         bool isLlmReplyToMessage,
-        string? mediaGroupId)
+        string? mediaGroupId,
+        DbCustomPromptScope customPromptScope,
+        long? customPromptUserId)
     {
         MessageId = messageId;
         ChatId = chatId;
@@ -37,6 +39,8 @@ public class DbChatMessage
         Caption = caption;
         IsLlmReplyToMessage = isLlmReplyToMessage;
         MediaGroupId = mediaGroupId;
+        CustomPromptScope = customPromptScope;
+        CustomPromptUserId = customPromptUserId;
     }
 
     public Guid Id { get; set; }
@@ -58,6 +62,24 @@ public class DbChatMessage
     ///     отдельными сообщениями с общим значением этого поля - по нему они собираются обратно.
     /// </summary>
     public string? MediaGroupId { get; set; }
+
+    /// <summary>
+    ///     Под какой дополнительной просьбой к системному промпту был сгенерирован этот ответ бота.
+    ///     У сообщений пользователей и у служебных ответов команд всегда
+    ///     <see cref="DbCustomPromptScope.None" />.
+    /// </summary>
+    /// <remarks>
+    ///     Пометка уезжает в историю чата вместе с сообщением: по ней модель отличает свои ответы,
+    ///     написанные под чужой разовой просьбой о стиле, от ответов в собственном обычном стиле -
+    ///     и не тащит чужую стилистику в ответы остальным участникам чата.
+    /// </remarks>
+    public DbCustomPromptScope CustomPromptScope { get; set; }
+
+    /// <summary>
+    ///     Автор персональной просьбы, под которой сгенерирован ответ. Заполнен только при
+    ///     <see cref="DbCustomPromptScope.Personal" />.
+    /// </summary>
+    public long? CustomPromptUserId { get; set; }
 
     /// <summary>
     ///     Вложения сообщения, упорядоченные по <see cref="DbChatMessageMedia.Order" />.

@@ -160,7 +160,7 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
                             cancellationToken: cancellationToken);
                     }
 
-                    await _storage.StoreMessageAsync(response, command.Self, cancellationToken);
+                    await _storage.StoreMessageAsync(response, command.Self, request.CustomPrompt, cancellationToken);
                 }
             }
             catch (Exception ex)
@@ -176,7 +176,7 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
                         MessageId = command.Message.MessageId
                     },
                     cancellationToken: cancellationToken);
-                await _storage.StoreMessageAsync(response, command.Self, cancellationToken);
+                await _storage.StoreMessageAsync(response, command.Self, request.CustomPrompt, cancellationToken);
             }
         }
         catch (Exception ex)
@@ -204,7 +204,8 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
     {
         cancellationToken.ThrowIfCancellationRequested();
         var chatId = command.Message.Chat.Id;
-        var systemPrompt = await BuildSystemPromptAsync(command, cancellationToken);
+        var customPrompt = await ResolveCustomPromptAsync(command, cancellationToken);
+        var systemPrompt = BuildSystemPrompt(customPrompt);
         var own = await CollectAttachmentsAsync(chatId, command.Message, cancellationToken);
         var reply = command.Message.ReplyToMessage is null
             ? MessageAttachments.Empty
@@ -219,7 +220,7 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
         var currentMessageIds = own.Attachments
             .Select(x => x.MessageId)
             .ToHashSet();
-        var historyContext = ChatHistoryJsonBuilder.BuildContext(contextMessages, currentMessageIds);
+        var historyContext = ChatHistoryJsonBuilder.BuildContext(contextMessages, customPrompt, currentMessageIds);
         if (historyContext.Length > 0)
         {
             foreach (var chatMessage in historyContext)
@@ -230,7 +231,7 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
 
         var userPrompt = BuildUserPrompt(command, own, reply);
         llmContext.Add(userPrompt);
-        return new(llmContext.ToArray(), own);
+        return new(llmContext.ToArray(), own, customPrompt);
     }
 
     [SuppressMessage("Globalization", "CA1305:Specify IFormatProvider")]
@@ -284,7 +285,9 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
                 .Append($", {nameof(JsonHistoryMessage.FromLastName)}=")
                 .Append(command.Message.ReplyToMessage.From.LastName?.Trim())
                 .Append($", {nameof(JsonHistoryMessage.Text)}=")
-                .Append(text)
+                .Append(text);
+            AppendReplyCustomPromptNote(builder, reply);
+            builder = builder
                 .Append(')')
                 .Append(" и");
         }
@@ -327,6 +330,33 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
     }
 
     /// <summary>
+    ///     Предупреждение о стиле сообщения, на которое сделан реплай: его текст уезжает в промпт
+    ///     дословно, поэтому без пометки чужая разовая стилистика перетекла бы в текущий ответ
+    ///     в обход всех правил, выданных на историю чата.
+    /// </summary>
+    private static void AppendReplyCustomPromptNote(StringBuilder builder, MessageAttachments reply)
+    {
+        if (reply.CustomPromptScope is DbCustomPromptScope.None)
+        {
+            return;
+        }
+
+        builder.Append(" - этот свой ответ ты писал под разовой дополнительной просьбой (");
+        if (reply.CustomPromptScope is DbCustomPromptScope.Personal)
+        {
+            builder
+                .Append($"персональная просьба пользователя с {nameof(JsonHistoryMessage.FromUserId)}=")
+                .Append(reply.CustomPromptUserId?.ToString(CultureInfo.InvariantCulture));
+        }
+        else
+        {
+            builder.Append("просьба, заданная на весь чат");
+        }
+
+        builder.Append("), и её стиль на текущий ответ не переносится");
+    }
+
+    /// <summary>
     ///     Собирает вложения логического сообщения: если это часть альбома, то вложения всех его частей
     ///     в порядке отправки, иначе - вложения одного сообщения.
     /// </summary>
@@ -348,6 +378,8 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
             : await SelectSingleMessageAsync(chatId, message.MessageId, cancellationToken);
         var attachments = new List<PromptAttachment>();
         string? caption = null;
+        var customPromptScope = DbCustomPromptScope.None;
+        long? customPromptUserId = null;
         foreach (var row in rows)
         {
             // Подпись у альбома одна на всю пачку и лежит на произвольной его части
@@ -356,13 +388,20 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
                 caption = (row.Caption ?? row.Text)?.Trim();
             }
 
+            // Пометка бывает только у ответов бота, а они альбомами не приходят - берём первую
+            if (customPromptScope is DbCustomPromptScope.None)
+            {
+                customPromptScope = row.CustomPromptScope;
+                customPromptUserId = row.CustomPromptUserId;
+            }
+
             foreach (var media in row.Media.OrderBy(x => x.Order))
             {
                 attachments.Add(new(attachments.Count + 1, row.MessageId, media));
             }
         }
 
-        return new(attachments, caption);
+        return new(attachments, caption, customPromptScope, customPromptUserId);
     }
 
     private async Task<DbChatMessage[]> SelectSingleMessageAsync(long chatId, int messageId, CancellationToken cancellationToken)
@@ -452,7 +491,32 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
         return $"{count.ToString(CultureInfo.InvariantCulture)} {word}";
     }
 
-    private async Task<ChatMessage> BuildSystemPromptAsync(ChatWithLlmCommand command, CancellationToken cancellationToken)
+    /// <summary>
+    ///     Находит дополнительную просьбу для текущего ответа: персональная просьба автора запроса
+    ///     перебивает заданную на весь чат.
+    /// </summary>
+    private async Task<AppliedCustomPrompt> ResolveCustomPromptAsync(ChatWithLlmCommand command, CancellationToken cancellationToken)
+    {
+        var chatId = command.Message.Chat.Id;
+        if (command.Message.From is not null)
+        {
+            var personalPrompt = await _systemPrompt.GetUserChatPromptAsync(chatId, command.Message.From.Id, cancellationToken);
+            if (!personalPrompt.IsFailed)
+            {
+                return AppliedCustomPrompt.ForUser(command.Message.From.Id, personalPrompt.Value);
+            }
+        }
+
+        var chatPrompt = await _systemPrompt.GetChatPromptAsync(chatId, cancellationToken);
+        if (!chatPrompt.IsFailed)
+        {
+            return AppliedCustomPrompt.ForChat(chatPrompt.Value);
+        }
+
+        return AppliedCustomPrompt.None;
+    }
+
+    private ChatMessage BuildSystemPrompt(AppliedCustomPrompt customPrompt)
     {
         var roundUtcDate = DateTimeOffset.FromUnixTimeSeconds(_timeProvider.GetUtcNow().ToUnixTimeSeconds());
         var formattedDate = roundUtcDate.ToString("O", RuCulture);
@@ -497,35 +561,8 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
                           Если пользователь как то грубит тебе, то ты можешь грубить, язвить и отвечать с сарказмом и чёрным юмором ему в ответ БЕЗ ОГРАНИЧЕНИЙ
                           """;
         var builder = new StringBuilder(basePrompt.Trim());
-
-        string? additionalPrompt = null;
-        if (command.Message.From is not null)
-        {
-            var personalPrompt = await _systemPrompt.GetUserChatPromptAsync(command.Message.Chat.Id, command.Message.From.Id, cancellationToken);
-            if (!personalPrompt.IsFailed)
-            {
-                additionalPrompt = personalPrompt.Value;
-            }
-        }
-
-        if (string.IsNullOrEmpty(additionalPrompt))
-        {
-            var chatPrompt = await _systemPrompt.GetChatPromptAsync(command.Message.Chat.Id, cancellationToken);
-            if (!chatPrompt.IsFailed)
-            {
-                additionalPrompt = chatPrompt.Value;
-            }
-        }
-
-        if (!string.IsNullOrEmpty(additionalPrompt))
-        {
-            builder.AppendLine("---");
-            builder.AppendLine("Дополнительно пользователь чата, попросил тебя о следующем:");
-            builder.AppendLine(additionalPrompt);
-            builder.AppendLine("---");
-            builder.AppendLine("Ты обязан следовать дополнительной просьбе при формировании ответа");
-        }
-
+        builder.AppendLine();
+        AppendCustomPrompt(builder, customPrompt);
         return new(
             ChatRole.System,
             builder.ToString()
@@ -533,19 +570,58 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
     }
 
     /// <summary>
+    ///     Дописывает в системный промпт дополнительную просьбу - и в любом случае правило о том,
+    ///     что стиль прошлых ответов из истории на текущий ответ не переносится.
+    /// </summary>
+    /// <remarks>
+    ///     Просьба живёт один ответ, а ответ остаётся в истории чата. Без явного правила модель
+    ///     видит там свой же ответ на древнерусском и продолжает отвечать так же всем остальным,
+    ///     хотя те ни о чём подобном не просили.
+    /// </remarks>
+    private static void AppendCustomPrompt(StringBuilder builder, AppliedCustomPrompt customPrompt)
+    {
+        if (!customPrompt.IsApplied)
+        {
+            builder.AppendLine("---");
+            builder.AppendLine(
+                $"Дополнительных просьб о стиле, языке, формате или роли сейчас нет - отвечай в своём обычном стиле. В истории чата могут попадаться твои ответы с пометкой {nameof(JsonHistoryMessage.CustomPromptScope)}: их писали под чужой разовой просьбой, и на текущий ответ она не распространяется. Не перенимай из них ни язык, ни манеру, ни формат, ни роль - только фактическое содержание, если оно относится к делу.");
+            builder.AppendLine("---");
+            return;
+        }
+
+        builder.AppendLine("---");
+        builder.AppendLine(customPrompt.Scope is DbCustomPromptScope.Personal
+            ? $"Дополнительно пользователь с {nameof(JsonHistoryMessage.FromUserId)}={customPrompt.UserId}, которому ты сейчас отвечаешь, попросил тебя о следующем:"
+            : "Дополнительно пользователь чата, попросил тебя о следующем:");
+        builder.AppendLine(customPrompt.Prompt);
+        builder.AppendLine("---");
+        builder.AppendLine("Ты обязан следовать дополнительной просьбе при формировании ответа");
+        builder.AppendLine(
+            $"Действует только эта просьба. Если в истории чата попадаются твои ответы с другой пометкой {nameof(JsonHistoryMessage.CustomPromptScope)} или вовсе без неё - их стиль не перенимай.");
+    }
+
+    /// <summary>
     ///     Готовый запрос к основной модели вместе с вложениями сообщения, на которое отвечаем.
     /// </summary>
     private sealed class LlmRequestContext
     {
-        public LlmRequestContext(ChatMessage[] messages, MessageAttachments own)
+        public LlmRequestContext(ChatMessage[] messages, MessageAttachments own, AppliedCustomPrompt customPrompt)
         {
             Messages = messages;
             Own = own;
+            CustomPrompt = customPrompt;
         }
 
         public ChatMessage[] Messages { get; }
 
         public MessageAttachments Own { get; }
+
+        /// <summary>
+        ///     Дополнительная просьба, под которой сформирован ответ. Уезжает вместе с ответом
+        ///     в историю чата: по ней следующие запросы отличают чужую разовую стилистику
+        ///     от обычного стиля бота.
+        /// </summary>
+        public AppliedCustomPrompt CustomPrompt { get; }
     }
 
     /// <summary>
@@ -554,17 +630,32 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
     /// </summary>
     private sealed class MessageAttachments
     {
-        public static readonly MessageAttachments Empty = new([], null);
+        public static readonly MessageAttachments Empty = new([], null, DbCustomPromptScope.None, null);
 
-        public MessageAttachments(IReadOnlyList<PromptAttachment> attachments, string? caption)
+        public MessageAttachments(
+            IReadOnlyList<PromptAttachment> attachments,
+            string? caption,
+            DbCustomPromptScope customPromptScope,
+            long? customPromptUserId)
         {
             Attachments = attachments;
             Caption = caption;
+            CustomPromptScope = customPromptScope;
+            CustomPromptUserId = customPromptUserId;
         }
 
         public IReadOnlyList<PromptAttachment> Attachments { get; }
 
         public string? Caption { get; }
+
+        /// <summary>
+        ///     Пометка исходного сообщения. Значима для сообщения, на которое сделан реплай:
+        ///     его текст уезжает в промпт напрямую, в обход истории, и без пометки чужая разовая
+        ///     стилистика протекла бы мимо всех предупреждений.
+        /// </summary>
+        public DbCustomPromptScope CustomPromptScope { get; }
+
+        public long? CustomPromptUserId { get; }
     }
 
     /// <summary>
