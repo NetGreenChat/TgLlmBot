@@ -19,6 +19,7 @@ public class BotDbContext : DbContext
     public DbSet<DbChatSystemPrompt> ChatSystemPrompts { get; set; }
     public DbSet<DbPersonalChatSystemPrompt> PersonalChatSystemPrompts { get; set; }
     public DbSet<DbUserLimit> Limits { get; set; }
+    public DbSet<DbChatLimit> ChatLimits { get; set; }
     public DbSet<DbChatUsage> Usage { get; set; }
     public DbSet<DbChatMessageMedia> ChatMessageMedia { get; set; }
     public DbSet<DbMediaDescription> MediaDescriptions { get; set; }
@@ -31,6 +32,7 @@ public class BotDbContext : DbContext
         modelBuilder.ApplyConfiguration(new DbChatSystemPromptEntityTypeConfiguration());
         modelBuilder.ApplyConfiguration(new DbPersonalChatSystemPromptEntityTypeConfiguration());
         modelBuilder.ApplyConfiguration(new DbUserLimitsEntityTypeConfiguration());
+        modelBuilder.ApplyConfiguration(new DbChatLimitsEntityTypeConfiguration());
         modelBuilder.ApplyConfiguration(new DbChatUsageEntityTypeConfiguration());
         modelBuilder.ApplyConfiguration(new DbChatMessageMediaEntityTypeConfiguration());
         modelBuilder.ApplyConfiguration(new DbMediaDescriptionEntityTypeConfiguration());

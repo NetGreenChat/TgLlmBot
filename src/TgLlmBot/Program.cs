@@ -31,6 +31,7 @@ using TgLlmBot.Commands.Rating;
 using TgLlmBot.Commands.Repo;
 using TgLlmBot.Commands.ResetChatSystemPrompt;
 using TgLlmBot.Commands.ResetPersonalSystemPrompt;
+using TgLlmBot.Commands.SetChatLimit;
 using TgLlmBot.Commands.SetChatSystemPrompt;
 using TgLlmBot.Commands.SetLimit;
 using TgLlmBot.Commands.SetPersonalSystemPrompt;
@@ -214,6 +215,7 @@ public partial class Program
         builder.Services.AddSingleton<ShowPersonalSystemPromptCommandHandler>();
         builder.Services.AddSingleton<ShowChatSystemPromptCommandHandler>();
         builder.Services.AddSingleton<SetLimitCommandHandler>();
+        builder.Services.AddSingleton<SetChatLimitCommandHandler>();
         // Separate LLM request queue per allowed chat, so different chats are processed in parallel
         builder.Services.AddSingleton(new DefaultLlmRequestQueuesOptions(
             config.Telegram.AllowedChatIds,

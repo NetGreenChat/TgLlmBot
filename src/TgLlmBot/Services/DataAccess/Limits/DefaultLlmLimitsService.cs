@@ -50,16 +50,27 @@ public class DefaultLlmLimitsService : ILlmLimitsService
 
         var dbContext = asyncScope.ServiceProvider.GetRequiredService<BotDbContext>();
         var date = _timeProvider.GetUtcNow().Date.ToUniversalTime();
-        var dbLimits = await dbContext.Limits.AsNoTracking()
+        var dbPersonalLimit = await dbContext.Limits.AsNoTracking()
             .Where(x => x.UserId == userId && x.ChatId == chatId)
             .FirstOrDefaultAsync(cancellationToken);
 
-        if (dbLimits is null)
+        // Персональный лимит перебивает общечатовый: !set_limit ставят точечно и уже зная,
+        // что в чате есть !set_chat_limit, поэтому именно он должен решать судьбу конкретного человека
+        int? limit = dbPersonalLimit?.Limit;
+        if (limit is null)
+        {
+            var dbChatLimit = await dbContext.ChatLimits.AsNoTracking()
+                .Where(x => x.ChatId == chatId)
+                .FirstOrDefaultAsync(cancellationToken);
+            limit = dbChatLimit?.Limit;
+        }
+
+        if (limit is not { } effectiveLimit)
         {
             return true;
         }
 
-        if (dbLimits.Limit == 0)
+        if (effectiveLimit == 0)
         {
             return false;
         }
@@ -68,7 +79,7 @@ public class DefaultLlmLimitsService : ILlmLimitsService
             .Where(x => x.UserId == userId && x.Date == date && x.ChatId == chatId)
             .FirstOrDefaultAsync(cancellationToken);
 
-        return (dbDailyUsage?.Used ?? 0) < dbLimits.Limit;
+        return (dbDailyUsage?.Used ?? 0) < effectiveLimit;
     }
 
     public async Task SetDailyLimitsAsync(long chatId, long userId, int limit, CancellationToken cancellationToken)
@@ -86,6 +97,24 @@ public class DefaultLlmLimitsService : ILlmLimitsService
                 new NpgsqlParameter($"{nameof(DbUserLimit.ChatId)}", chatId),
                 new NpgsqlParameter($"{nameof(DbUserLimit.UserId)}", userId),
                 new NpgsqlParameter($"{nameof(DbUserLimit.Limit)}", limit));
+        }
+    }
+
+    public async Task SetChatDailyLimitAsync(long chatId, int limit, CancellationToken cancellationToken)
+    {
+        const string sql = $"""
+                                INSERT INTO "{nameof(BotDbContext.ChatLimits)}" ("{nameof(DbChatLimit.ChatId)}", "{nameof(DbChatLimit.Limit)}")
+                                VALUES (@{nameof(DbChatLimit.ChatId)}, @{nameof(DbChatLimit.Limit)})
+                                ON CONFLICT ("{nameof(DbChatLimit.ChatId)}") DO UPDATE SET "{nameof(DbChatLimit.Limit)}" = @{nameof(DbChatLimit.Limit)};
+                            """;
+        cancellationToken.ThrowIfCancellationRequested();
+        await using (var asyncScope = _serviceScopeFactory.CreateAsyncScope())
+        {
+            var dbContext = asyncScope.ServiceProvider.GetRequiredService<BotDbContext>();
+            await dbContext.Database.ExecuteSqlRawAsync(
+                sql,
+                new NpgsqlParameter($"{nameof(DbChatLimit.ChatId)}", chatId),
+                new NpgsqlParameter($"{nameof(DbChatLimit.Limit)}", limit));
         }
     }
 }

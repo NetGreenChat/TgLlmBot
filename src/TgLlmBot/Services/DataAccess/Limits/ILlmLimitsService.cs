@@ -10,4 +10,6 @@ public interface ILlmLimitsService
     Task<bool> IsLLmInteractionAllowedAsync(long chatId, long userId, CancellationToken cancellationToken);
 
     Task SetDailyLimitsAsync(long chatId, long userId, int limit, CancellationToken cancellationToken);
+
+    Task SetChatDailyLimitAsync(long chatId, int limit, CancellationToken cancellationToken);
 }

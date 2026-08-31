@@ -14,6 +14,7 @@ using TgLlmBot.Commands.Rating;
 using TgLlmBot.Commands.Repo;
 using TgLlmBot.Commands.ResetChatSystemPrompt;
 using TgLlmBot.Commands.ResetPersonalSystemPrompt;
+using TgLlmBot.Commands.SetChatLimit;
 using TgLlmBot.Commands.SetChatSystemPrompt;
 using TgLlmBot.Commands.SetLimit;
 using TgLlmBot.Commands.SetPersonalSystemPrompt;
@@ -54,6 +55,7 @@ public partial class DefaultTelegramCommandDispatcher : ITelegramCommandDispatch
     private readonly ResetChatSystemPromptCommandHandler _resetChatSystemPrompt;
     private readonly ResetPersonalSystemPromptCommandHandler _resetPersonalSystemPrompt;
     private readonly ITelegramSelfInformation _self;
+    private readonly SetChatLimitCommandHandler _setChatLimit;
     private readonly SetChatSystemPromptCommandHandler _setChatSystemPrompt;
     private readonly SetLimitCommandHandler _setLimit;
     private readonly SetPersonalSystemPromptCommandHandler _setPersonalSystemPrompt;
@@ -79,6 +81,7 @@ public partial class DefaultTelegramCommandDispatcher : ITelegramCommandDispatch
         ShowChatSystemPromptCommandHandler showChatSystemPrompt,
         ShowPersonalSystemPromptCommandHandler showPersonalSystemPrompt,
         SetLimitCommandHandler setLimit,
+        SetChatLimitCommandHandler setChatLimit,
         IMediaRecognitionQueues mediaRecognitionQueues,
         IMediaGroupTracker mediaGroupTracker,
         ILogger<DefaultTelegramCommandDispatcher> logger)
@@ -100,6 +103,7 @@ public partial class DefaultTelegramCommandDispatcher : ITelegramCommandDispatch
         ArgumentNullException.ThrowIfNull(showChatSystemPrompt);
         ArgumentNullException.ThrowIfNull(showPersonalSystemPrompt);
         ArgumentNullException.ThrowIfNull(setLimit);
+        ArgumentNullException.ThrowIfNull(setChatLimit);
         ArgumentNullException.ThrowIfNull(mediaRecognitionQueues);
         ArgumentNullException.ThrowIfNull(mediaGroupTracker);
         ArgumentNullException.ThrowIfNull(logger);
@@ -120,6 +124,7 @@ public partial class DefaultTelegramCommandDispatcher : ITelegramCommandDispatch
         _showChatSystemPrompt = showChatSystemPrompt;
         _showPersonalSystemPrompt = showPersonalSystemPrompt;
         _setLimit = setLimit;
+        _setChatLimit = setChatLimit;
         _mediaRecognitionQueues = mediaRecognitionQueues;
         _mediaGroupTracker = mediaGroupTracker;
         _logger = logger;
@@ -281,6 +286,13 @@ public partial class DefaultTelegramCommandDispatcher : ITelegramCommandDispatch
         {
             var command = new SetPersonalSystemPromptCommand(message, type, self);
             await _setPersonalSystemPrompt.HandleAsync(command, cancellationToken);
+            return;
+        }
+
+        if (rawPrompt.StartsWith("!set_chat_limit", StringComparison.Ordinal))
+        {
+            var command = new SetChatLimitCommand(message, type, self);
+            await _setChatLimit.HandleAsync(command, cancellationToken);
             return;
         }
 
