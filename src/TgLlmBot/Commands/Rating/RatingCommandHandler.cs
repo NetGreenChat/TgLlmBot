@@ -132,6 +132,10 @@ public class RatingCommandHandler : AbstractCommandHandler<RatingCommand>
                         {
                             MessageId = command.Message.MessageId
                         },
+                        ephemeralMessageParameters: new()
+                        {
+                            ReceiverUserId = command.Message.From.Id
+                        },
                         cancellationToken: cancellationToken);
                     await _storage.StoreMessageAsync(response, command.Self, cancellationToken);
                     return;
