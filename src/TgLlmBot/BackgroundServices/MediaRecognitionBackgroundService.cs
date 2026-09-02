@@ -238,12 +238,8 @@ public partial class MediaRecognitionBackgroundService : BackgroundService
     private async Task HandleJobAsync(MediaRecognitionJob job, CancellationToken cancellationToken)
     {
         Log.HandlingJob(_logger, job.ChatId, job.MessageId, job.RequiresResponse);
-        if (job.RequiresResponse)
-        {
-            // Индикатор печати на всё время распознавания: пользователь видит, что бот работает
-            _typingStatusService.StartTyping(job.ChatId);
-        }
-
+        // Индикатор печати на всё время распознавания: пользователь видит, что бот работает
+        using var typing = job.RequiresResponse ? _typingStatusService.StartTyping(job.ChatId) : null;
         try
         {
             var mediaItems = await CollectMediaAsync(job, cancellationToken);
@@ -326,7 +322,7 @@ public partial class MediaRecognitionBackgroundService : BackgroundService
             // ответ пойдёт с fallback-описаниями, иначе сообщение останется без ответа
             if (job.RequiresResponse)
             {
-                _typingStatusService.StopTyping(job.ChatId);
+                typing?.Stop();
                 if (!cancellationToken.IsCancellationRequested && job.Command is not null && !_llmRequestQueues.TryEnqueue(job.ChatId, job.Command))
                 {
                     Log.ContinuationFailed(_logger, job.ChatId, job.MessageId);

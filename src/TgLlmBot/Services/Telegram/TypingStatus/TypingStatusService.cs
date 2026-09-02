@@ -16,19 +16,16 @@ public partial class TypingStatusService : ITypingStatusService
         _logger = logger;
     }
 
-    public void StartTyping(long chatId)
+    public TypingScope StartTyping(long chatId)
     {
-        Enqueue(chatId, true);
+        var requestId = Guid.NewGuid();
+        Enqueue(chatId, requestId, true);
+        return new(() => Enqueue(chatId, requestId, false));
     }
 
-    public void StopTyping(long chatId)
+    private void Enqueue(long chatId, Guid requestId, bool isTyping)
     {
-        Enqueue(chatId, false);
-    }
-
-    private void Enqueue(long chatId, bool isTyping)
-    {
-        if (!_queues.TryEnqueue(chatId, new(chatId, isTyping)))
+        if (!_queues.TryEnqueue(chatId, new(chatId, requestId, isTyping)))
         {
             // Очереди без потолка, так что сюда попадает только чат без очереди или остановка
             // приложения. Молча терять именно выключение нельзя: чат останется печатать

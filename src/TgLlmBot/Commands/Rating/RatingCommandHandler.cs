@@ -114,15 +114,15 @@ public class RatingCommandHandler : AbstractCommandHandler<RatingCommand>
     {
         cancellationToken.ThrowIfCancellationRequested();
         ArgumentNullException.ThrowIfNull(command);
+        using var typing = _typingStatusService.StartTyping(command.Message.Chat.Id);
         try
         {
-            _typingStatusService.StartTyping(command.Message.Chat.Id);
             if (command.Message.From?.Id is not null)
             {
                 var isAllowed = await _limits.IsLLmInteractionAllowedAsync(command.Message.Chat.Id, command.Message.From.Id, cancellationToken);
                 if (!isAllowed)
                 {
-                    _typingStatusService.StopTyping(command.Message.Chat.Id);
+                    typing.Stop();
                     var response = await _bot.SendPhoto(
                         command.Message.Chat,
                         new InputFileStream(new MemoryStream(EmbeddedResources.StopJpg), "stop.jpg"),
@@ -164,7 +164,7 @@ public class RatingCommandHandler : AbstractCommandHandler<RatingCommand>
             var llmResponse = await _chatClient.GetResponseAsync(context, chatOptions, cancellationToken);
             // ReSharper disable once ConditionalAccessQualifierIsNonNullableAccordingToAPIContract
             var rawLLmResponse = llmResponse.Text?.Trim();
-            _typingStatusService.StopTyping(command.Message.Chat.Id);
+            typing.Stop();
 
             if (TryDeserializeLlmResponse(rawLLmResponse, out var data))
             {
@@ -186,7 +186,7 @@ public class RatingCommandHandler : AbstractCommandHandler<RatingCommand>
         }
         catch (Exception ex)
         {
-            _typingStatusService.StopTyping(command.Message.Chat.Id);
+            typing.Stop();
             var response = await _bot.SendMessage(
                 command.Message.Chat,
                 ex.Message,
