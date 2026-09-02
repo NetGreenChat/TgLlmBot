@@ -9,9 +9,9 @@ namespace TgLlmBot.Services.Telegram.TypingStatus;
 /// <remarks>
 ///     Обработчики гасят печать перед отправкой ответа, а потом ещё раз в обработчиках ошибок -
 ///     повторная остановка здесь обязана быть безвредной, иначе лишний стоп списался бы с чужой
-///     просьбы. <see cref="Dispose" /> - страховка на пути, где явный <see cref="Stop" /> не вызвался.
+///     просьбы.
 /// </remarks>
-public sealed class TypingScope : IDisposable
+public sealed class TypingScope
 {
     private Action? _stop;
 
@@ -24,10 +24,5 @@ public sealed class TypingScope : IDisposable
     public void Stop()
     {
         Interlocked.Exchange(ref _stop, null)?.Invoke();
-    }
-
-    public void Dispose()
-    {
-        Stop();
     }
 }

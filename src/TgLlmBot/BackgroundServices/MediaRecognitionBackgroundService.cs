@@ -239,7 +239,7 @@ public partial class MediaRecognitionBackgroundService : BackgroundService
     {
         Log.HandlingJob(_logger, job.ChatId, job.MessageId, job.RequiresResponse);
         // Индикатор печати на всё время распознавания: пользователь видит, что бот работает
-        using var typing = job.RequiresResponse ? _typingStatusService.StartTyping(job.ChatId) : null;
+        var typing = job.RequiresResponse ? _typingStatusService.StartTyping(job.ChatId) : null;
         try
         {
             var mediaItems = await CollectMediaAsync(job, cancellationToken);
@@ -322,11 +322,14 @@ public partial class MediaRecognitionBackgroundService : BackgroundService
             // ответ пойдёт с fallback-описаниями, иначе сообщение останется без ответа
             if (job.RequiresResponse)
             {
-                typing?.Stop();
                 if (!cancellationToken.IsCancellationRequested && job.Command is not null && !_llmRequestQueues.TryEnqueue(job.ChatId, job.Command))
                 {
                     Log.ContinuationFailed(_logger, job.ChatId, job.MessageId);
                 }
+
+                // Свою просьбу печатать гасим только после передачи эстафеты: обработчик ответа
+                // заводит свою в первой же строке, и чат не остаётся без индикатора между ними
+                typing?.Stop();
             }
         }
     }

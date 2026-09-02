@@ -114,7 +114,7 @@ public class RatingCommandHandler : AbstractCommandHandler<RatingCommand>
     {
         cancellationToken.ThrowIfCancellationRequested();
         ArgumentNullException.ThrowIfNull(command);
-        using var typing = _typingStatusService.StartTyping(command.Message.Chat.Id);
+        var typing = _typingStatusService.StartTyping(command.Message.Chat.Id);
         try
         {
             if (command.Message.From?.Id is not null)

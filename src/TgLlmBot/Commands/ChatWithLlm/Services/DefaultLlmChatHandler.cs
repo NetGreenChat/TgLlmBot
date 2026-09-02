@@ -83,7 +83,7 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
     public async Task HandleCommandAsync(ChatWithLlmCommand command, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(command);
-        using var typing = _typingStatusService.StartTyping(command.Message.Chat.Id);
+        var typing = _typingStatusService.StartTyping(command.Message.Chat.Id);
         try
         {
             Log.ProcessingLlmRequest(_logger, command.Message.From?.Username, command.Message.From?.Id);

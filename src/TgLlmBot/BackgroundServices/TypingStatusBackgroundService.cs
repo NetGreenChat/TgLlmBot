@@ -94,18 +94,13 @@ public partial class TypingStatusBackgroundService : BackgroundService
                     requests.Remove(command.RequestId);
                 }
 
-                if (requests.Count > 0)
+                // Уже печатаем или уже молчим - команда ничего не меняет
+                if (requests.Count > 0 && typing is null)
                 {
-                    if (typing is not null)
-                    {
-                        // Уже печатаем - второй таймер ни к чему
-                        continue;
-                    }
-
                     cts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
                     typing = RunTypingAsync(chatId, cts.Token);
                 }
-                else if (typing is not null)
+                else if (requests.Count is 0 && typing is not null)
                 {
                     await StopTypingAsync(cts!, typing);
                     cts = null;
