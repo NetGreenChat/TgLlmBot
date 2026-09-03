@@ -127,7 +127,19 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
                 RawRepresentationFactory = static _ => LlmRawRequestFactory.CreateChatCompletionOptions()
             };
             var llmResponse = await _chatClient.GetResponseAsync(request.Messages, chatOptions, cancellationToken);
-            var rawLLmResponse = llmResponse.Text.Trim();
+            // ChatResponse.Text склеивает текст всех сообщений ответа, а FunctionInvokingChatClient
+            // складывает туда и промежуточные реплики модели между вызовами MCP-инструментов.
+            // Наружу идёт только финальный ответ: всё, что модель написала после последнего
+            // вызова инструмента (финальный текст может занимать несколько сообщений подряд).
+            var lastToolCallIndex = llmResponse.Messages
+                .ToList()
+                .FindLastIndex(static message => message.Contents.Any(static content => content is FunctionCallContent));
+
+            var rawLLmResponse = string.Concat(llmResponse.Messages
+                    .Skip(lastToolCallIndex + 1)
+                    .Where(static message => message.Role == ChatRole.Assistant)
+                    .Select(static message => message.Text))
+                .Trim();
             var llmResponseText = rawLLmResponse;
             if (string.IsNullOrWhiteSpace(rawLLmResponse))
             {
