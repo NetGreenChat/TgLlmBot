@@ -83,16 +83,16 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
     public async Task HandleCommandAsync(ChatWithLlmCommand command, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(command);
+        var typing = _typingStatusService.StartTyping(command.Message.Chat.Id);
         try
         {
             Log.ProcessingLlmRequest(_logger, command.Message.From?.Username, command.Message.From?.Id);
-            _typingStatusService.StartTyping(command.Message.Chat.Id);
             if (command.Message.From?.Id is not null)
             {
                 var isAllowed = await _limits.IsLLmInteractionAllowedAsync(command.Message.Chat.Id, command.Message.From.Id, cancellationToken);
                 if (!isAllowed)
                 {
-                    _typingStatusService.StopTyping(command.Message.Chat.Id);
+                    typing.Stop();
                     var response = await _bot.SendPhoto(
                         command.Message.Chat,
                         new InputFileStream(new MemoryStream(EmbeddedResources.StopJpg), "stop.jpg"),
@@ -137,7 +137,7 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
             try
             {
                 var finalText = _telegramMarkdownConverter.ConvertToPartedTelegramMarkdown(llmResponseText, 2000);
-                _typingStatusService.StopTyping(command.Message.Chat.Id);
+                typing.Stop();
                 for (var i = 0; i < finalText.Length; i++)
                 {
                     await Task.Delay(1000, cancellationToken);
@@ -170,7 +170,7 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
             catch (Exception ex)
             {
                 Log.MarkdownConversionOrSendFailed(_logger, ex);
-                _typingStatusService.StopTyping(command.Message.Chat.Id);
+                typing.Stop();
                 var response = await _bot.SendMessage(
                     command.Message.Chat,
                     llmResponseText,
@@ -186,7 +186,7 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
         catch (Exception ex)
         {
             Log.LlmInvocationOrImageProcessingFailed(_logger, ex);
-            _typingStatusService.StopTyping(command.Message.Chat.Id);
+            typing.Stop();
 
             var response = await _bot.SendMessage(
                 command.Message.Chat,

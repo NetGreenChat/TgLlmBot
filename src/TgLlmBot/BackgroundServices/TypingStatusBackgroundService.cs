@@ -67,6 +67,8 @@ public partial class TypingStatusBackgroundService : BackgroundService
     /// <remarks>
     ///     Состояние печати чата живёт здесь, в локальных переменных воркера, и больше нигде:
     ///     трогать его может только этот цикл, поэтому ни словаря, ни блокировок не нужно.
+    ///     Печать держится, пока есть хотя бы одна незакрытая просьба: в одном чате они приходят
+    ///     от нескольких источников одновременно, и выключение одной не должно гасить остальные.
     /// </remarks>
     [SuppressMessage("Reliability", "CA2025:Ensure tasks using 'IDisposable' instances complete before the instances are disposed")]
     [SuppressMessage("Reliability", "CA2000:Dispose objects before losing scope")]
@@ -77,31 +79,28 @@ public partial class TypingStatusBackgroundService : BackgroundService
     {
         CancellationTokenSource? cts = null;
         Task? typing = null;
+        var requests = new HashSet<Guid>();
         try
         {
             await foreach (var command in reader.ReadAllAsync(stoppingToken))
             {
-                // Цикл печати мог выйти сам - например, бота выгнали из чата и статус больше
-                // некуда слать. Подчищаем, иначе чат так и числился бы печатающим
-                if (typing is { IsCompleted: true })
-                {
-                    await StopTypingAsync(cts!, typing);
-                    cts = null;
-                    typing = null;
-                }
-
                 if (command.IsTyping)
                 {
-                    if (typing is not null)
-                    {
-                        // Уже печатаем - второй таймер ни к чему
-                        continue;
-                    }
+                    requests.Add(command.RequestId);
+                }
+                else
+                {
+                    // Повторный стоп той же просьбы - штатный случай, множество его просто не заметит
+                    requests.Remove(command.RequestId);
+                }
 
+                // Уже печатаем или уже молчим - команда ничего не меняет
+                if (requests.Count > 0 && typing is null)
+                {
                     cts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
                     typing = RunTypingAsync(chatId, cts.Token);
                 }
-                else if (typing is not null)
+                else if (requests.Count is 0 && typing is not null)
                 {
                     await StopTypingAsync(cts!, typing);
                     cts = null;
@@ -138,7 +137,11 @@ public partial class TypingStatusBackgroundService : BackgroundService
         cts.Dispose();
     }
 
-    [SuppressMessage("Design", "CA1031:Do not catch general exception types")]
+    /// <remarks>
+    ///     Цикл живёт до отмены. Неудачная отправка - таймаут, сетевая ошибка, лимит Telegram -
+    ///     только логируется: раньше она выкидывала из цикла, и до следующей просьбы чат
+    ///     оставался без индикатора, хотя ответ ещё генерировался.
+    /// </remarks>
     private async Task RunTypingAsync(long chatId, CancellationToken ct)
     {
         LogTypingActionStarted(chatId);
@@ -157,16 +160,24 @@ public partial class TypingStatusBackgroundService : BackgroundService
             }
         }
         catch (OperationCanceledException) { }
+    }
+
+    [SuppressMessage("Design", "CA1031:Do not catch general exception types")]
+    private async Task SendTypingRequest(long chatId, CancellationToken ct)
+    {
+        try
+        {
+            await _bot.SendChatAction(chatId, ChatAction.Typing, cancellationToken: ct);
+            LogTypingActionSent(chatId);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
         catch (Exception ex)
         {
             LogFailedToSendChatActionToChat(chatId, ex);
         }
-    }
-
-    private async Task SendTypingRequest(long chatId, CancellationToken ct)
-    {
-        await _bot.SendChatAction(chatId, ChatAction.Typing, cancellationToken: ct);
-        LogTypingActionSent(chatId);
     }
 
     [LoggerMessage(LogLevel.Information, "Typing Service Started with {ChatsCount} per-chat queues")]
