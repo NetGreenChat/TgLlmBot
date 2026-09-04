@@ -374,6 +374,7 @@ public class RatingCommandHandler : AbstractCommandHandler<RatingCommand>
                 x.MessageId,
                 x.MessageThreadId,
                 x.ReplyToMessageId,
+                x.ReplyToQuoteText?.Trim(),
                 x.FromUserId,
                 x.FromUsername?.Trim(),
                 x.FromFirstName?.Trim(),
@@ -389,6 +390,7 @@ public class RatingCommandHandler : AbstractCommandHandler<RatingCommand>
                                 {nameof(JsonHistoryMessage.MessageId)} - Id сообщения
                                 {nameof(JsonHistoryMessage.MessageThreadId)} - Id сообщения, с которого начался тред с цепочкой реплаев
                                 {nameof(JsonHistoryMessage.ReplyToMessageId)} - Id оригинального сообщения, на которое даётся ответ (реплай)
+                                {nameof(JsonHistoryMessage.ReplyToQuoteText)} - дословно процитированный кусок сообщения с {nameof(JsonHistoryMessage.ReplyToMessageId)}: есть только когда отвечали не на всё сообщение, а на выделенный его фрагмент
                                 {nameof(JsonHistoryMessage.FromUserId)} - Id автора сообщения
                                 {nameof(JsonHistoryMessage.FromUsername)} - Username автора сообщения
                                 {nameof(JsonHistoryMessage.FromFirstName)} - Имя автора сообщения
@@ -451,12 +453,13 @@ public class RatingCommandHandler : AbstractCommandHandler<RatingCommand>
 
     private sealed class JsonHistoryMessage
     {
-        public JsonHistoryMessage(DateTimeOffset dateTimeUtc, int messageId, int? messageThreadId, int? replyToMessageId, long? fromUserId, string? fromUsername, string? fromFirstName, string? fromLastName, string? text, bool isLlmReplyToMessage)
+        public JsonHistoryMessage(DateTimeOffset dateTimeUtc, int messageId, int? messageThreadId, int? replyToMessageId, string? replyToQuoteText, long? fromUserId, string? fromUsername, string? fromFirstName, string? fromLastName, string? text, bool isLlmReplyToMessage)
         {
             DateTimeUtc = dateTimeUtc;
             MessageId = messageId;
             MessageThreadId = messageThreadId;
             ReplyToMessageId = replyToMessageId;
+            ReplyToQuoteText = replyToQuoteText;
             FromUserId = fromUserId;
             FromUsername = fromUsername;
             FromFirstName = fromFirstName;
@@ -469,6 +472,9 @@ public class RatingCommandHandler : AbstractCommandHandler<RatingCommand>
         public int MessageId { get; }
         public int? MessageThreadId { get; }
         public int? ReplyToMessageId { get; }
+
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string? ReplyToQuoteText { get; }
         public long? FromUserId { get; }
         public string? FromUsername { get; }
         public string? FromFirstName { get; }

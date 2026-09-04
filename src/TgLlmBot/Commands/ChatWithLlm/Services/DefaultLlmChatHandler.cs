@@ -276,11 +276,18 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
             .Append(command.Message.From?.FirstName?.Trim())
             .Append($" и {nameof(JsonHistoryMessage.FromLastName)}=")
             .Append(command.Message.From?.LastName?.Trim());
+        // При цитировании фрагмента Telegram присылает и полный текст оригинала, и саму цитату -
+        // интерес для ответа представляет именно выделенный кусок, а не всё сообщение
+        var quote = command.Message.Quote?.Text?.Trim();
         if (command.Message.ReplyToMessage is not null)
         {
-            var text = command.Message.ReplyToMessage.Text?.Trim() ?? command.Message.ReplyToMessage.Caption?.Trim();
+            var text = string.IsNullOrEmpty(quote)
+                ? command.Message.ReplyToMessage.Text?.Trim() ?? command.Message.ReplyToMessage.Caption?.Trim()
+                : quote;
             builder = builder
-                .Append($" сделал реплай на более раннее сообщение с {nameof(JsonHistoryMessage.MessageId)}=")
+                .Append(string.IsNullOrEmpty(quote)
+                    ? $" сделал реплай на более раннее сообщение с {nameof(JsonHistoryMessage.MessageId)}="
+                    : $" процитировал часть более раннего сообщения с {nameof(JsonHistoryMessage.MessageId)}=")
                 .Append(command.Message.ReplyToMessage.Id)
                 .Append(" (которое ");
             if (replyAttachments.Count > 0)
@@ -306,6 +313,15 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
             builder = builder
                 .Append(')')
                 .Append(" и");
+        }
+        else if (!string.IsNullOrEmpty(quote))
+        {
+            // Реплай с цитатой на сообщение не из этого чата (пересланное или из другого чата):
+            // самого сообщения у нас нет, есть только процитированный кусок
+            builder = builder
+                .Append($" процитировал часть сообщения, которое не из этого чата (само сообщение тебе недоступно, есть только цитата с {nameof(JsonHistoryMessage.Text)}=")
+                .Append(quote)
+                .Append(") и");
         }
 
         builder = builder

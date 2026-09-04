@@ -63,6 +63,7 @@ public static class ChatHistoryJsonBuilder
                                 {nameof(JsonHistoryMessage.MessageId)} - Id сообщения
                                 {nameof(JsonHistoryMessage.MessageThreadId)} - Id сообщения, с которого начался тред с цепочкой реплаев
                                 {nameof(JsonHistoryMessage.ReplyToMessageId)} - Id оригинального сообщения, на которое даётся ответ (реплай)
+                                {nameof(JsonHistoryMessage.ReplyToQuoteText)} - дословно процитированный кусок сообщения с {nameof(JsonHistoryMessage.ReplyToMessageId)}: есть только когда отвечали не на всё сообщение, а на выделенный его фрагмент
                                 {nameof(JsonHistoryMessage.FromUserId)} - Id автора сообщения
                                 {nameof(JsonHistoryMessage.FromUsername)} - Username автора сообщения
                                 {nameof(JsonHistoryMessage.FromFirstName)} - Имя автора сообщения
@@ -165,6 +166,7 @@ public static class ChatHistoryJsonBuilder
                 x.MessageId,
                 x.MessageThreadId,
                 x.ReplyToMessageId,
+                x.ReplyToQuoteText?.Trim(),
                 x.FromUserId,
                 x.FromUsername?.Trim(),
                 x.FromFirstName?.Trim(),
@@ -247,6 +249,7 @@ public sealed class JsonHistoryMessage
         int messageId,
         int? messageThreadId,
         int? replyToMessageId,
+        string? replyToQuoteText,
         long? fromUserId,
         string? fromUsername,
         string? fromFirstName,
@@ -263,6 +266,7 @@ public sealed class JsonHistoryMessage
         MessageId = messageId;
         MessageThreadId = messageThreadId;
         ReplyToMessageId = replyToMessageId;
+        ReplyToQuoteText = replyToQuoteText;
         FromUserId = fromUserId;
         FromUsername = fromUsername;
         FromFirstName = fromFirstName;
@@ -280,6 +284,13 @@ public sealed class JsonHistoryMessage
     public int MessageId { get; }
     public int? MessageThreadId { get; }
     public int? ReplyToMessageId { get; }
+
+    /// <summary>
+    ///     Дословная цитата из сообщения <see cref="ReplyToMessageId" />. Пишется только у ответов
+    ///     на выделенный фрагмент: у обычных реплаев поля в JSON нет вовсе.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? ReplyToQuoteText { get; }
     public long? FromUserId { get; }
     public string? FromUsername { get; }
     public string? FromFirstName { get; }
