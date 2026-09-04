@@ -278,9 +278,16 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
             .Append(command.Message.From?.LastName?.Trim());
         if (command.Message.ReplyToMessage is not null)
         {
-            var text = command.Message.ReplyToMessage.Text?.Trim() ?? command.Message.ReplyToMessage.Caption?.Trim();
+            // При цитировании фрагмента Telegram присылает и полный текст оригинала, и саму цитату -
+            // интерес для ответа представляет именно выделенный кусок, а не всё сообщение
+            var quote = command.Message.Quote?.Text?.Trim();
+            var text = string.IsNullOrEmpty(quote)
+                ? command.Message.ReplyToMessage.Text?.Trim() ?? command.Message.ReplyToMessage.Caption?.Trim()
+                : quote;
             builder = builder
-                .Append($" сделал реплай на более раннее сообщение с {nameof(JsonHistoryMessage.MessageId)}=")
+                .Append(string.IsNullOrEmpty(quote)
+                    ? $" сделал реплай на более раннее сообщение с {nameof(JsonHistoryMessage.MessageId)}="
+                    : $" процитировал часть более раннего сообщения с {nameof(JsonHistoryMessage.MessageId)}=")
                 .Append(command.Message.ReplyToMessage.Id)
                 .Append(" (которое ");
             if (replyAttachments.Count > 0)

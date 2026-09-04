@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 
 namespace TgLlmBot.DataAccess.Models;
@@ -14,6 +14,7 @@ public class DbChatMessage
         long chatId,
         int? messageThreadId,
         int? replyToMessageId,
+        string? replyToQuoteText,
         DateTime date,
         long? fromUserId,
         string? fromUsername,
@@ -30,6 +31,7 @@ public class DbChatMessage
         ChatId = chatId;
         MessageThreadId = messageThreadId;
         ReplyToMessageId = replyToMessageId;
+        ReplyToQuoteText = replyToQuoteText;
         Date = date;
         FromUserId = fromUserId;
         FromUsername = fromUsername;
@@ -48,6 +50,12 @@ public class DbChatMessage
     public long ChatId { get; set; }
     public int? MessageThreadId { get; set; }
     public int? ReplyToMessageId { get; set; }
+
+    /// <summary>
+    ///     Дословный текст процитированной части сообщения <see cref="ReplyToMessageId" />.
+    ///     Заполнен, только когда автор ответил не на всё сообщение, а на выделенный его фрагмент.
+    /// </summary>
+    public string? ReplyToQuoteText { get; set; }
     public DateTime Date { get; set; }
     public long? FromUserId { get; set; }
     public string? FromUsername { get; set; }
