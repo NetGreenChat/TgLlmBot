@@ -94,6 +94,10 @@ namespace TgLlmBot.Migrations
                     b.Property<int?>("ReplyToMessageId")
                         .HasColumnType("integer");
 
+                    b.Property<string>("ReplyToQuoteText")
+                        .HasMaxLength(4096)
+                        .HasColumnType("character varying(4096)");
+
                     b.Property<string>("Text")
                         .HasMaxLength(4096)
                         .HasColumnType("character varying(4096)");

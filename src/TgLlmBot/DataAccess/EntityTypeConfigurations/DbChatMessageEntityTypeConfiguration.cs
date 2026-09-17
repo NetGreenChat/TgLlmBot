@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
 using TgLlmBot.DataAccess.Models;
@@ -19,6 +19,8 @@ public class DbChatMessageEntityTypeConfiguration : IEntityTypeConfiguration<DbC
         builder.Property(x => x.FromLastName).HasMaxLength(64);
         builder.Property(x => x.Text).HasMaxLength(4096);
         builder.Property(x => x.Caption).HasMaxLength(4096);
+        // Цитата - кусок чужого текста или подписи, так что больше их лимита быть не может
+        builder.Property(x => x.ReplyToQuoteText).HasMaxLength(4096);
         builder.Property(x => x.MediaGroupId).HasMaxLength(64);
         // Перечисление строкой - как и у вложений: в базу чаще смотрят глазами, чем джойнят по ней
         builder.Property(x => x.CustomPromptScope).HasConversion<string>().HasMaxLength(32).IsRequired();
