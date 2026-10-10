@@ -202,6 +202,36 @@ public class DefaultTelegramMessageStorage : ITelegramMessageStorage
     }
 
     [SuppressMessage("ReSharper", "ConvertToUsingDeclaration")]
+    public async Task<DbChatMessage[]> SelectMessagesAsync(long chatId, IReadOnlyCollection<int> messageIds, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        ArgumentNullException.ThrowIfNull(messageIds);
+        if (messageIds.Count is 0)
+        {
+            return [];
+        }
+
+        var ids = messageIds.Distinct().ToArray();
+        await using (var asyncScope = _serviceScopeFactory.CreateAsyncScope())
+        {
+            var dbContext = asyncScope.ServiceProvider.GetRequiredService<BotDbContext>();
+            var rows = await dbContext.ChatHistory
+                .AsNoTracking()
+                .Include(x => x.Media.OrderBy(m => m.Order))
+                .Where(x => x.ChatId == chatId && ids.Contains(x.MessageId))
+                // Выгнанных участников в историю не пускаем - и в цитаты тоже
+                .Where(x => !dbContext.KickedUsers.Any(k => k.ChatId == x.ChatId && k.UserId == x.FromUserId))
+                .ToListAsync(cancellationToken);
+            // Один и тот же id мог сохраниться дважды - берём последнюю запись, как SelectMessageAsync
+            return rows
+                .GroupBy(x => x.MessageId)
+                .Select(x => x.OrderByDescending(m => m.Date).First())
+                .OrderBy(x => x.Date)
+                .ToArray();
+        }
+    }
+
+    [SuppressMessage("ReSharper", "ConvertToUsingDeclaration")]
     public async Task<DbChatMessage[]> SelectMediaGroupMessagesAsync(long chatId, string mediaGroupId, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();

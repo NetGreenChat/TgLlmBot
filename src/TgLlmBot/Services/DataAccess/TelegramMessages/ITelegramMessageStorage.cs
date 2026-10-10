@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Telegram.Bot.Types;
@@ -67,6 +68,20 @@ public interface ITelegramMessageStorage
     Task<DbChatMessage?> SelectMessageAsync(
         long chatId,
         int messageId,
+        CancellationToken cancellationToken);
+
+    /// <summary>
+    ///     Возвращает сообщения чата по их идентификаторам вместе с вложениями, в хронологическом
+    ///     порядке. Чего в базе нет, того в результате не будет; сообщения выгнанных участников
+    ///     не возвращаются, как и в выборке истории.
+    /// </summary>
+    /// <remarks>
+    ///     Нужен ради цитат в строках реплаев: реплай из истории может указывать на сообщение,
+    ///     которое в окно истории уже не попало, а модели важно видеть, на что отвечали.
+    /// </remarks>
+    Task<DbChatMessage[]> SelectMessagesAsync(
+        long chatId,
+        IReadOnlyCollection<int> messageIds,
         CancellationToken cancellationToken);
 
     /// <summary>

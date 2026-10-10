@@ -12,8 +12,8 @@ using Microsoft.Extensions.Logging;
 using Telegram.Bot;
 using Telegram.Bot.Types;
 using Telegram.Bot.Types.Enums;
-using TgLlmBot.DataAccess.Models;
 using TgLlmBot.Configuration.TypedConfiguration.Llm;
+using TgLlmBot.DataAccess.Models;
 using TgLlmBot.Services.DataAccess.Limits;
 using TgLlmBot.Services.DataAccess.SystemPrompts;
 using TgLlmBot.Services.DataAccess.TelegramMessages;
@@ -30,14 +30,18 @@ namespace TgLlmBot.Commands.ChatWithLlm.Services;
 
 public partial class DefaultLlmChatHandler : ILlmChatHandler
 {
-    private static readonly CultureInfo RuCulture = new("ru-RU");
-
     /// <summary>
     ///     Суммарный потолок на размер нативно приложенных вложений в одном запросе - в символах
     ///     data-url. Альбомы бывают большими, а памяти у сервера модели не бесконечно: что в
     ///     бюджет не влезло, уезжает текстовым описанием, как вложения из глубокой истории.
     /// </summary>
     private const long EmbeddedMediaBudgetChars = 64 * 1024 * 1024;
+
+    /// <summary>
+    ///     Общее для всех вариантов капабилити правило: вложения не путать между собой.
+    /// </summary>
+    private const string MediaConfusionRule =
+        "Не путай вложения между собой и не приписывай одному то, что было на другом: строка каждого вложения стоит под заголовком того сообщения, к которому оно относится, и нумерована по порядку отправки. Если в описании сказано, что разглядеть не удалось или описание ещё готовится, - считай, что вложение ты не разглядел, и не выдумывай его содержимое.";
 
     private readonly TelegramBotClient _bot;
     private readonly IChatClient _chatClient;
@@ -156,11 +160,13 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
                 .ToList()
                 .FindLastIndex(static message => message.Contents.Any(static content => content is FunctionCallContent));
 
-            var rawLLmResponse = string.Concat(llmResponse.Messages
-                    .Skip(lastToolCallIndex + 1)
-                    .Where(static message => message.Role == ChatRole.Assistant)
-                    .Select(static message => message.Text))
-                .Trim();
+            var finalResponseText = string.Concat(llmResponse.Messages
+                .Skip(lastToolCallIndex + 1)
+                .Where(static message => message.Role == ChatRole.Assistant)
+                .Select(static message => message.Text));
+            // Служебную разметку истории (заголовок, строку реплая, разделитель) модель
+            // воспроизводить не должна, но на всякий случай из начала ответа она вычищается
+            var rawLLmResponse = ChatTranscriptFormat.StripLeakedMarkup(finalResponseText).Trim();
             var llmResponseText = rawLLmResponse;
             if (string.IsNullOrWhiteSpace(rawLLmResponse))
             {
@@ -234,6 +240,10 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
         }
     }
 
+    /// <summary>
+    ///     Собирает запрос к модели: системный промпт, историю чата чередующимися репликами
+    ///     и последнюю user-реплику с сообщением, на которое надо ответить.
+    /// </summary>
     private async Task<LlmRequestContext> BuildContextAsync(
         ChatWithLlmCommand command,
         DbChatMessage[] contextMessages,
@@ -242,36 +252,79 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
         cancellationToken.ThrowIfCancellationRequested();
         var chatId = command.Message.Chat.Id;
         var customPrompt = await ResolveCustomPromptAsync(command, cancellationToken);
-        var systemPrompt = BuildSystemPrompt(customPrompt);
         var own = await CollectAttachmentsAsync(chatId, command.Message, waitForAlbum: true, cancellationToken);
         var reply = command.Message.ReplyToMessage is null
             ? MessageAttachments.Empty
             : await CollectAttachmentsAsync(chatId, command.Message.ReplyToMessage, waitForAlbum: false, cancellationToken);
-        var llmContext = new List<ChatMessage>
-        {
-            systemPrompt
-        };
 
-        // Остальные части альбома - это то же самое сообщение, на которое бот сейчас отвечает.
-        // В историю они попадать не должны, иначе их картинки уедут в контекст дважды
-        var currentMessageIds = own.Attachments
-            .Select(x => x.MessageId)
+        // Само сообщение и остальные части его альбома в историю не попадают: их текст и
+        // вложения уезжают в запрос отдельно, иначе картинки оказались бы в контексте дважды
+        var currentMessageIds = own.Parts
+            .Select(static x => x.MessageId)
+            .Append(command.Message.MessageId)
             .ToHashSet();
-        var historyContext = ChatHistoryJsonBuilder.BuildContext(contextMessages, customPrompt, currentMessageIds);
-        if (historyContext.Length > 0)
+        var quoted = await LoadQuotedMessagesAsync(chatId, contextMessages, currentMessageIds, cancellationToken);
+
+        // Подписи участников - одни и те же во всём запросе; автор текущего сообщения
+        // регистрируется последним, чтобы его подпись была самой свежей
+        var authors = ChatAuthorDirectory.FromMessages(contextMessages.Concat(quoted).Concat(reply.Parts));
+        var currentAuthor = DescribeAuthor(command.Message.From, command.Message.SenderChat);
+        if (command.Message.From is not null)
         {
-            foreach (var chatMessage in historyContext)
-            {
-                llmContext.Add(chatMessage);
-            }
+            authors.Register(command.Message.From.Id, currentAuthor);
         }
 
         // Вложения своего сообщения и реплая модель видит сама - они уезжают в запрос
         // медиа-частями, а не текстовым описанием
         var embedded = await PrepareEmbeddedMediaAsync(own, reply, cancellationToken);
-        var userPrompt = BuildUserPrompt(command, own, reply, embedded);
-        llmContext.Add(userPrompt);
-        return new(llmContext.ToArray(), customPrompt);
+        var currentMessageBlock = BuildCurrentMessageBlock(command, own, reply, embedded, authors, currentAuthor);
+
+        // Медиа-части идут перед текстом: маркеры подменит на image_url/video_url MultimodalChatClient,
+        // и модель увидит вложения раньше, чем текст о них
+        var currentMessageMedia = embedded
+            .Select(static x => (AIContent) new AttachedMediaContent(x.Media))
+            .ToArray();
+        var conversation = ChatTranscriptBuilder.BuildConversation(new(
+            contextMessages,
+            quoted,
+            currentMessageIds,
+            authors,
+            currentMessageBlock,
+            currentMessageMedia));
+        var messages = new List<ChatMessage>(conversation.Length + 1)
+        {
+            BuildSystemPrompt(command, customPrompt, currentAuthor)
+        };
+        messages.AddRange(conversation);
+        return new(messages.ToArray(), customPrompt);
+    }
+
+    /// <summary>
+    ///     Догружает сообщения, на которые ссылаются реплаи из истории, но которые в окно истории
+    ///     не попали: без них строка реплая не смогла бы процитировать, на что отвечали.
+    /// </summary>
+    private async Task<DbChatMessage[]> LoadQuotedMessagesAsync(
+        long chatId,
+        DbChatMessage[] contextMessages,
+        HashSet<int> currentMessageIds,
+        CancellationToken cancellationToken)
+    {
+        var known = contextMessages
+            .Select(static x => x.MessageId)
+            .ToHashSet();
+        var missing = contextMessages
+            .Where(x => !currentMessageIds.Contains(x.MessageId))
+            .Select(static x => x.ReplyToMessageId)
+            .Where(x => x is { } id && !known.Contains(id) && !currentMessageIds.Contains(id))
+            .Select(static x => x!.Value)
+            .Distinct()
+            .ToArray();
+        if (missing.Length is 0)
+        {
+            return [];
+        }
+
+        return await _storage.SelectMessagesAsync(chatId, missing, cancellationToken);
     }
 
     /// <summary>
@@ -345,15 +398,54 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
         return embedded;
     }
 
-    [SuppressMessage("Globalization", "CA1305:Specify IFormatProvider")]
-    private ChatMessage BuildUserPrompt(
+    /// <summary>
+    ///     Текущее сообщение в том же формате, что и сообщения истории: заголовок, строка реплая
+    ///     (с вложениями того сообщения, на которое отвечают), строки своих вложений, текст.
+    /// </summary>
+    /// <remarks>
+    ///     Вложение, которое приложено к запросу нативно, помечено номером медиа-части; остальное
+    ///     описано текстом, как вложения из истории. Если капабилити модели вложение не покрывают,
+    ///     в описании прямо сказано, что распознавание не поддерживается: иначе модель решает,
+    ///     что разглядела его по статическому кадру.
+    /// </remarks>
+    private string BuildCurrentMessageBlock(
         ChatWithLlmCommand command,
         MessageAttachments own,
         MessageAttachments reply,
-        IReadOnlyList<EmbeddedMedia> embedded)
+        IReadOnlyList<EmbeddedMedia> embedded,
+        ChatAuthorDirectory authors,
+        string currentAuthor)
     {
-        var replyAttachments = reply.Attachments;
-        var ownAttachments = own.Attachments;
+        var message = command.Message;
+
+        // Альбом - это N сообщений с общим MediaGroupId, и в заголовке перечисляются все его части
+        int[] messageIds = own.Parts.Count > 0
+            ? own.Parts.Select(static x => x.MessageId).Order().ToArray()
+            : [message.MessageId];
+        var builder = new StringBuilder();
+        builder.Append(ChatTranscriptFormat.FormatHeader(messageIds, message.Date, currentAuthor, own.Attachments.Count));
+
+        if (message.ReplyToMessage is { } replied)
+        {
+            builder.AppendLine().Append(BuildReplyLine(command, replied, reply, authors));
+            if (reply.Attachments.Count > 0)
+            {
+                builder
+                    .AppendLine()
+                    .Append("  вложения сообщения #")
+                    .Append(replied.MessageId.ToString(CultureInfo.InvariantCulture))
+                    .Append(':');
+                foreach (var attachment in reply.Attachments)
+                {
+                    builder.AppendLine().Append("  ").Append(DescribeAttachment(attachment, reply.Attachments.Count, embedded));
+                }
+            }
+        }
+
+        foreach (var attachment in own.Attachments)
+        {
+            builder.AppendLine().Append(DescribeAttachment(attachment, own.Attachments.Count, embedded));
+        }
 
         // У альбома подпись лежит на одной из частей, а запрос стартует по первой пришедшей -
         // поэтому текст вопроса берём из той части, где он реально оказался
@@ -363,120 +455,84 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
             prompt = own.Caption;
         }
 
-        var builder = new StringBuilder()
-            .Append($"Пользователь с {nameof(JsonHistoryMessage.FromUserId)}=")
-            .Append(command.Message.From?.Id ?? 0)
-            .Append($", {nameof(JsonHistoryMessage.FromUsername)}=@")
-            .Append(command.Message.From?.Username?.Trim())
-            .Append($", {nameof(JsonHistoryMessage.FromFirstName)}=")
-            .Append(command.Message.From?.FirstName?.Trim())
-            .Append($" и {nameof(JsonHistoryMessage.FromLastName)}=")
-            .Append(command.Message.From?.LastName?.Trim());
-        if (command.Message.ReplyToMessage is not null)
+        if (!string.IsNullOrEmpty(prompt))
         {
-            var text = command.Message.ReplyToMessage.Text?.Trim() ?? command.Message.ReplyToMessage.Caption?.Trim();
-            builder = builder
-                .Append($" сделал реплай на более раннее сообщение с {nameof(JsonHistoryMessage.MessageId)}=")
-                .Append(command.Message.ReplyToMessage.Id)
-                .Append(" (которое ");
-            if (replyAttachments.Count > 0)
-            {
-                builder = builder
-                    .Append("содержало ")
-                    .Append(DescribeAttachmentsCount(replyAttachments))
-                    .Append(" и ");
-            }
-
-            builder = builder
-                .Append($"было отправлено пользователем с {nameof(JsonHistoryMessage.FromUserId)}=")
-                .Append(command.Message.ReplyToMessage.From!.Id)
-                .Append($", {nameof(JsonHistoryMessage.FromUsername)}=@")
-                .Append(command.Message.ReplyToMessage.From.Username?.Trim())
-                .Append($", {nameof(JsonHistoryMessage.FromFirstName)}=")
-                .Append(command.Message.ReplyToMessage.From.FirstName?.Trim())
-                .Append($", {nameof(JsonHistoryMessage.FromLastName)}=")
-                .Append(command.Message.ReplyToMessage.From.LastName?.Trim())
-                .Append($", {nameof(JsonHistoryMessage.Text)}=")
-                .Append(text);
-            AppendReplyCustomPromptNote(builder, reply);
-            builder = builder
-                .Append(')')
-                .Append(" и");
+            builder.AppendLine().Append(prompt);
         }
 
-        builder = builder
-            .Append(" отправил тебе (")
-            .Append(_options.BotName)
-            .Append($", твой {nameof(JsonHistoryMessage.FromUserId)}=")
-            .Append(command.Self.Id)
-            .Append($", твой {nameof(JsonHistoryMessage.FromUsername)}=@")
-            .Append(command.Self.Username?.Trim())
-            .Append($") сообщение с {nameof(JsonHistoryMessage.MessageId)}=")
-            .Append(command.Message.Id);
-        if (ownAttachments.Count > 0)
-        {
-            builder = builder
-                .Append(", которое содержит ")
-                .Append(DescribeAttachmentsCount(ownAttachments));
-        }
-
-        builder = builder
-            .Append($" и {nameof(JsonHistoryMessage.Text)}=")
-            .Append(prompt);
-
-        AppendAttachments(
-            builder,
-            $"Вот что было приложено к сообщению с {nameof(JsonHistoryMessage.MessageId)}={command.Message.Id.ToString(CultureInfo.InvariantCulture)}",
-            ownAttachments,
-            embedded);
-        if (command.Message.ReplyToMessage is not null)
-        {
-            AppendAttachments(
-                builder,
-                $"Вот что было приложено к сообщению с {nameof(JsonHistoryMessage.MessageId)}={command.Message.ReplyToMessage.Id.ToString(CultureInfo.InvariantCulture)}, на которое сделан реплай",
-                replyAttachments,
-                embedded);
-        }
-
-        var commandText = builder.ToString();
-
-        // Медиа-части идут перед текстом: маркеры подменит на image_url/video_url MultimodalChatClient,
-        // и модель увидит вложения раньше, чем текст о них
-        var contents = new List<AIContent>(embedded.Count + 1);
-        foreach (var media in embedded)
-        {
-            contents.Add(new AttachedMediaContent(media.Media));
-        }
-
-        contents.Add(new TextContent(commandText));
-        return new ChatMessage(ChatRole.User, contents);
+        return builder.ToString();
     }
 
     /// <summary>
-    ///     Предупреждение о стиле сообщения, на которое сделан реплай: его текст уезжает в промпт
-    ///     дословно, поэтому без пометки чужая разовая стилистика перетекла бы в текущий ответ
-    ///     в обход всех правил, выданных на историю чата.
+    ///     Строка реплая текущего сообщения. Текст и автор берутся из того, что прислал Telegram,
+    ///     вложения и пометка о разовой просьбе - из сохранённой истории.
     /// </summary>
-    private static void AppendReplyCustomPromptNote(StringBuilder builder, MessageAttachments reply)
+    private static string BuildReplyLine(
+        ChatWithLlmCommand command,
+        Message replied,
+        MessageAttachments reply,
+        ChatAuthorDirectory authors)
     {
-        if (reply.CustomPromptScope is DbCustomPromptScope.None)
+        var isBotMessage = replied.From?.Id == command.Self.Id || reply.Parts.Any(static x => x.IsLlmReplyToMessage);
+        var text = reply.Caption ?? (replied.Text ?? replied.Caption)?.Trim();
+        var markers = reply.Attachments.Select(static x => ChatTranscriptFormat.FormatMediaMarker(x.Media));
+        var excerpt = ChatTranscriptFormat.Excerpt(string.Join(' ', markers.Append(text).Where(static x => !string.IsNullOrEmpty(x))));
+        if (isBotMessage)
         {
-            return;
+            // Цитата уезжает в промпт дословно, в обход истории: без пометки чужая разовая
+            // стилистика перетекла бы в текущий ответ мимо всех правил
+            var note = reply.CustomPromptScope is DbCustomPromptScope.None
+                ? null
+                : ChatTranscriptFormat.FormatReplyCustomPromptNote(reply.CustomPromptScope, authors.Resolve(reply.CustomPromptUserId));
+            return ChatTranscriptFormat.FormatBotReplyLine(replied.MessageId, excerpt, note);
         }
 
-        builder.Append(" - этот свой ответ ты писал под разовой дополнительной просьбой (");
-        if (reply.CustomPromptScope is DbCustomPromptScope.Personal)
+        var author = replied.From is { } from && authors.TryGet(from.Id, out var label)
+            ? label
+            : DescribeAuthor(replied.From, replied.SenderChat);
+        return ChatTranscriptFormat.FormatReplyLine(replied.MessageId, author, excerpt);
+    }
+
+    /// <summary>
+    ///     Подпись автора по данным Telegram. Сообщения от имени канала или группы приходят
+    ///     без пользователя - тогда подписью служит название чата-отправителя.
+    /// </summary>
+    private static string DescribeAuthor(User? from, Chat? senderChat)
+    {
+        return from is not null
+            ? ChatTranscriptFormat.FormatAuthor(from.Id, from.FirstName, from.LastName, from.Username)
+            : ChatTranscriptFormat.FormatAuthor(null, senderChat?.Title, null, senderChat?.Username);
+    }
+
+    /// <summary>
+    ///     Строка вложения текущего сообщения или реплая: номер медиа-части, если вложение
+    ///     приложено к запросу нативно, иначе текстовое описание.
+    /// </summary>
+    private string DescribeAttachment(PromptAttachment attachment, int count, IReadOnlyList<EmbeddedMedia> embedded)
+    {
+        var embeddedIndex = FindEmbeddedIndex(embedded, attachment);
+        if (embeddedIndex is { } index)
         {
-            builder
-                .Append($"персональная просьба пользователя с {nameof(JsonHistoryMessage.FromUserId)}=")
-                .Append(reply.CustomPromptUserId?.ToString(CultureInfo.InvariantCulture));
-        }
-        else
-        {
-            builder.Append("просьба, заданная на весь чат");
+            return ChatTranscriptFormat.FormatEmbeddedMediaLine(attachment.Media, attachment.Order, count, index + 1);
         }
 
-        builder.Append("), и её стиль на текущий ответ не переносится");
+        var description = _capabilities.Supports(attachment.Media.Kind, attachment.Media.IsAnimated)
+            ? ChatTranscriptFormat.DescribeMedia(attachment.Media)
+            : LlmCapabilitiesConfiguration.DescribeUnsupported(attachment.Media.Kind, attachment.Media.IsAnimated);
+        return ChatTranscriptFormat.FormatMediaLine(attachment.Media, attachment.Order, count, description);
+    }
+
+    private static int? FindEmbeddedIndex(IReadOnlyList<EmbeddedMedia> embedded, PromptAttachment attachment)
+    {
+        for (var i = 0; i < embedded.Count; i++)
+        {
+            if (ReferenceEquals(embedded[i].Attachment, attachment))
+            {
+                return i;
+            }
+        }
+
+        return null;
     }
 
     /// <summary>
@@ -511,6 +567,7 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
         {
             rows = await SelectSingleMessageAsync(chatId, message.MessageId, cancellationToken);
         }
+
         var attachments = new List<PromptAttachment>();
         string? caption = null;
         var customPromptScope = DbCustomPromptScope.None;
@@ -530,141 +587,19 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
                 customPromptUserId = row.CustomPromptUserId;
             }
 
-            foreach (var media in row.Media.OrderBy(x => x.Order))
+            foreach (var media in row.Media.OrderBy(static x => x.Order))
             {
                 attachments.Add(new(attachments.Count + 1, row.MessageId, media));
             }
         }
 
-        return new(attachments, caption, customPromptScope, customPromptUserId);
+        return new(rows, attachments, caption, customPromptScope, customPromptUserId);
     }
 
     private async Task<DbChatMessage[]> SelectSingleMessageAsync(long chatId, int messageId, CancellationToken cancellationToken)
     {
         var row = await _storage.SelectMessageAsync(chatId, messageId, cancellationToken);
         return row is null ? [] : [row];
-    }
-
-    /// <summary>
-    ///     Блоки вложений в промпте. Встроенное в запрос вложение помечается блоком
-    ///     <c>&lt;media&gt;</c> с номером медиа-части, остальное описывается текстом в
-    ///     <c>&lt;media_description&gt;</c> - как вложения из истории. Если капабилити модели
-    ///     вложение не покрывают, в описании прямо сказано, что распознавание не поддерживается:
-    ///     иначе модель решает, что разглядела его по статическому кадру.
-    /// </summary>
-    private void AppendAttachments(
-        StringBuilder builder,
-        string title,
-        IReadOnlyList<PromptAttachment> attachments,
-        IReadOnlyList<EmbeddedMedia> embedded)
-    {
-        if (attachments.Count is 0)
-        {
-            return;
-        }
-
-        builder
-            .AppendLine()
-            .AppendLine()
-            .Append(title)
-            .AppendLine(" (в том порядке, в котором приходило в чат):");
-        foreach (var attachment in attachments)
-        {
-            var embeddedIndex = FindEmbeddedIndex(embedded, attachment);
-            builder
-                .Append(embeddedIndex is null ? "<media_description " : "<media ")
-                .Append("order=\"")
-                .Append(attachment.Order.ToString(CultureInfo.InvariantCulture))
-                .Append("\" message_id=\"")
-                .Append(attachment.MessageId.ToString(CultureInfo.InvariantCulture))
-                .Append("\" kind=\"")
-                .Append(DescribeKind(attachment.Media))
-                .Append('"');
-            AppendStickerAttributes(builder, attachment.Media);
-            if (embeddedIndex is null)
-            {
-                var description = _capabilities.Supports(attachment.Media.Kind, attachment.Media.IsAnimated)
-                    ? ChatHistoryJsonBuilder.DescribeMedia(attachment.Media)
-                    : LlmCapabilitiesConfiguration.DescribeUnsupported(attachment.Media.Kind, attachment.Media.IsAnimated);
-                builder
-                    .AppendLine(">")
-                    .AppendLine(description)
-                    .AppendLine("</media_description>");
-            }
-            else
-            {
-                builder
-                    .Append(" part=\"")
-                    .Append((embeddedIndex.Value + 1).ToString(CultureInfo.InvariantCulture))
-                    .AppendLine("\">")
-                    .AppendLine("содержимое вложения приложено к этому сообщению непосредственно, медиа-частью перед текстом - разглядывай его сам")
-                    .AppendLine("</media>");
-            }
-        }
-    }
-
-    private static int? FindEmbeddedIndex(IReadOnlyList<EmbeddedMedia> embedded, PromptAttachment attachment)
-    {
-        for (var i = 0; i < embedded.Count; i++)
-        {
-            if (ReferenceEquals(embedded[i].Attachment, attachment))
-            {
-                return i;
-            }
-        }
-
-        return null;
-    }
-
-    private static void AppendStickerAttributes(StringBuilder builder, DbChatMessageMedia media)
-    {
-        var emoji = SanitizeAttributeValue(media.Emoji);
-        if (!string.IsNullOrEmpty(emoji))
-        {
-            builder.Append(" emoji=\"").Append(emoji).Append('"');
-        }
-
-        var setName = SanitizeAttributeValue(media.SetName);
-        if (!string.IsNullOrEmpty(setName))
-        {
-            builder.Append(" sticker_set=\"").Append(setName).Append('"');
-        }
-    }
-
-    private static string? SanitizeAttributeValue(string? value)
-    {
-        return value?.Trim().Replace("\"", string.Empty, StringComparison.Ordinal);
-    }
-
-    private static string DescribeKind(DbChatMessageMedia media)
-    {
-        return MediaKindNames.Describe(media.Kind, media.IsAnimated);
-    }
-
-    /// <summary>
-    ///     "картинку", "3 картинки", "5 гифок", "4 вложения" - то, что подставляется
-    ///     в фразу "сообщение содержит ...".
-    /// </summary>
-    private static string DescribeAttachmentsCount(IReadOnlyList<PromptAttachment> attachments)
-    {
-        var count = attachments.Count;
-        // Альбом в Telegram может смешивать картинки и видео: для разнородной пачки
-        // остаётся нейтральное "вложение"
-        var kinds = attachments.Select(static x => x.Media.Kind).Distinct().ToArray();
-        var (one, few, many) = MediaKindNames.DescribeCountable(kinds.Length is 1 ? kinds[0] : null);
-        if (count is 1)
-        {
-            return one;
-        }
-
-        var lastTwoDigits = count % 100;
-        var lastDigit = count % 10;
-        var word = lastTwoDigits is >= 11 and <= 14 || lastDigit is 0 or >= 5
-            ? many
-            : lastDigit is 1
-                ? one
-                : few;
-        return $"{count.ToString(CultureInfo.InvariantCulture)} {word}";
     }
 
     /// <summary>
@@ -692,81 +627,103 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
         return AppliedCustomPrompt.None;
     }
 
-    private ChatMessage BuildSystemPrompt(AppliedCustomPrompt customPrompt)
+    private ChatMessage BuildSystemPrompt(ChatWithLlmCommand command, AppliedCustomPrompt customPrompt, string currentAuthor)
     {
-        var roundUtcDate = DateTimeOffset.FromUnixTimeSeconds(_timeProvider.GetUtcNow().ToUnixTimeSeconds());
-        var formattedDate = roundUtcDate.ToString("O", RuCulture);
+        var formattedDate = ChatTranscriptFormat.FormatTimestamp(_timeProvider.GetUtcNow());
+        var botUsername = command.Self.Username?.Trim();
+        var identity = string.IsNullOrEmpty(botUsername)
+            ? $"Ты - полезный чат-бот в групповом чате, тебя зовут {_options.BotName}."
+            : $"Ты - полезный чат-бот в групповом чате, тебя зовут {_options.BotName} (твой username в Telegram - @{botUsername}).";
         var mediaRules = (_capabilities.Image, _capabilities.Video) switch
         {
             (true, true) =>
-                """
-                Ты - мультимодальный бот: вложения (картинки, стикеры, гифки, видео) из сообщения, на которое отвечаешь, и из сообщения, на которое сделан реплай, приложены к запросу сами по себе - медиа-частями перед текстом сообщения. Ты видишь их непосредственно: разглядывай при ответе. У каждого приложенного вложения в тексте есть блок <media> с part (номер медиа-части в запросе), order (номер вложения внутри своего сообщения) и message_id.
-                Вложения из более старых сообщений истории приложить уже нельзя: они приходят текстовыми описаниями - в поле Media у сообщений истории и в блоках <media_description> текущего запроса. Считай такие описания тем, что ты увидел своими глазами.
-                Не рассказывай пользователю ни про медиа-части, ни про блоки с описаниями - для него ты просто видишь вложения.
-                Не путай вложения между собой и не приписывай одному то, что было на другом: их порядок задают order и message_id. Если у описания сказано, что разглядеть не удалось или описание ещё готовится - так и считай, что вложение ты не разглядел, и не выдумывай его содержимое.
-                """,
+                $"""
+                 Ты - мультимодальный бот: вложения (картинки, стикеры, гифки, видео) нового сообщения и сообщения, на которое оно отвечает, приложены к запросу сами по себе - медиа-частями перед текстом. Ты видишь их непосредственно: разглядывай при ответе. У такого вложения в строке написано «это медиа-часть N этого запроса» - по номеру понятно, какая из приложенных картинок или какое из видео имеется в виду.
+                 Вложения из более старых сообщений приложить уже нельзя: вместо них в строке вложения стоит текстовое описание - считай его тем, что ты увидел своими глазами.
+                 Не рассказывай пользователю ни про медиа-части, ни про описания - для него ты просто видишь вложения.
+                 {MediaConfusionRule}
+                 """,
             (false, false) =>
-                """
-                Сам ты картинки, стикеры, гифки и видео не видишь: тебе приходит их текстовое описание - в блоках <media_description> для текущего сообщения и в поле Media у сообщений из истории чата. Считай такие описания тем, что ты увидел своими глазами, и не рассказывай пользователю ни про сами блоки с описаниями.
-                У каждого описания есть order (номер вложения внутри сообщения) и message_id - по ним понятно, в каком порядке вложения прислали и какое описание к какому из них относится. Не путай вложения между собой и не приписывай одному то, что было на другом.
-                Если у описания сказано, что распознавание не поддерживается, - скажи об этом пользователю прямо. Если сказано, что разглядеть не удалось или описание ещё готовится - так и считай, что вложение ты не разглядел, и не выдумывай его содержимое.
-                """,
+                $"""
+                 Сам ты картинки, стикеры, гифки и видео не видишь: вместо каждого вложения тебе приходит его текстовое описание в строке вложения. Считай описание тем, что ты увидел своими глазами, и не рассказывай пользователю про описания - для него ты просто видишь вложения.
+                 Если в описании сказано, что распознавание не поддерживается, - скажи об этом пользователю прямо.
+                 {MediaConfusionRule}
+                 """,
             (true, false) =>
-                """
-                Ты видишь картинки, но не видео: фото и статические стикеры из сообщения, на которое отвечаешь, и из сообщения, на которое сделан реплай, приложены к запросу сами по себе - медиа-частями перед текстом сообщения, разглядывай их. Видео, гифки и анимированные стикеры ты не видишь: и в текущем сообщении, и в истории чата они приходят текстовым описанием - в блоках <media_description> и в поле Media.
-                Если в описании движущегося вложения сказано, что распознавание не поддерживается, - скажи об этом пользователю прямо, не пытайся разглядеть вложение по одному кадру и не выдумывай его содержимое.
-                Считай описания картинок тем, что ты увидел своими глазами. Не рассказывай пользователю ни про медиа-части, ни про блоки с описаниями - для него ты просто видишь вложения.
-                Не путай вложения между собой и не приписывай одному то, что было на другом: их порядок задают order и message_id.
-                """,
+                $"""
+                 Ты видишь картинки, но не видео: фото и статические стикеры нового сообщения и сообщения, на которое оно отвечает, приложены к запросу сами по себе - медиа-частями перед текстом, разглядывай их. У такого вложения в строке написано «это медиа-часть N этого запроса» - по номеру понятно, какая из приложенных картинок имеется в виду. Видео, гифки и анимированные стикеры ты не видишь: и в новом сообщении, и в истории они приходят текстовым описанием в строке вложения.
+                 Если в описании движущегося вложения сказано, что распознавание не поддерживается, - скажи об этом пользователю прямо, не пытайся разглядеть вложение по одному кадру и не выдумывай его содержимое.
+                 Описания считай тем, что ты увидел своими глазами. Не рассказывай пользователю ни про медиа-части, ни про описания - для него ты просто видишь вложения.
+                 {MediaConfusionRule}
+                 """,
             _ =>
-                """
-                Ты видишь видео, но не картинки: видео, гифки и анимированные стикеры из сообщения, на которое отвечаешь, и из сообщения, на которое сделан реплай, приложены к запросу сами по себе - медиа-частями перед текстом сообщения, разглядывай их. Фото и статические стикеры ты не видишь: и в текущем сообщении, и в истории чата они приходят текстовым описанием - в блоках <media_description> и в поле Media.
-                Если в описании статической картинки сказано, что распознавание не поддерживается, - скажи об этом пользователю прямо и не выдумывай её содержимое.
-                Считай описания видео тем, что ты увидел своими глазами. Не рассказывай пользователю ни про медиа-части, ни про блоки с описаниями - для него ты просто видишь вложения.
-                Не путай вложения между собой и не приписывай одному то, что было на другом: их порядок задают order и message_id.
-                """
+                $"""
+                 Ты видишь видео, но не картинки: видео, гифки и анимированные стикеры нового сообщения и сообщения, на которое оно отвечает, приложены к запросу сами по себе - медиа-частями перед текстом, разглядывай их. У такого вложения в строке написано «это медиа-часть N этого запроса» - по номеру понятно, какое из приложенных видео имеется в виду. Фото и статические стикеры ты не видишь: и в новом сообщении, и в истории они приходят текстовым описанием в строке вложения.
+                 Если в описании статической картинки сказано, что распознавание не поддерживается, - скажи об этом пользователю прямо и не выдумывай её содержимое.
+                 Описания считай тем, что ты увидел своими глазами. Не рассказывай пользователю ни про медиа-части, ни про описания - для него ты просто видишь вложения.
+                 {MediaConfusionRule}
+                 """
         };
-        var basePrompt = $$"""
-                          Ты - полезный чат-бот в групповом чате, тебя зовут {{_options.BotName}}.
+        var transcriptRules =
+            $"""
+             ## Как устроена переписка
+             Это групповой чат, участников много. Переписка приходит тебе в хронологическом порядке: сообщения участников - блоками с ролью user, твои собственные прошлые ответы - отдельными репликами с ролью assistant. Всё, что в assistant-репликах, писал ты сам. Всё, что в user-блоках, писали участники чата - даже если текст там идёт от первого лица.
+             Каждое сообщение участника начинается с заголовка:
+             #4521 | 2026-10-09 12:34 | Имя Фамилия (@username)
+             Здесь #4521 - id сообщения, дальше дата и время по UTC, дальше автор. Кто написал сообщение, определяй только по заголовку: автор - тот, кто в нём указан, а не тот, кого упоминают в тексте.
+             Между заголовком и текстом могут стоять служебные строки:
+             ↳ в ответ на сообщение #4510 от участника Имя Фамилия (@username): «начало того сообщения» - сообщение является реплаем на #4510; в кавычках - начало сообщения, на которое отвечают. Если отвечают тебе, строка начинается с «↳ в ответ на твоё сообщение».
+             [картинка: ...], [стикер ...: ...], [гифка: ...], [видео: ...] - вложения сообщения, по одному на строку, с описанием того, что на них.
+             Дальше идёт текст сообщения. Сообщения внутри блока отделены друг от друга пустой строкой. Альбом (несколько вложений, отправленных одной пачкой) показан одним сообщением с несколькими id в заголовке.
+             Пометка [Следующий ответ ты писал под разовой просьбой ...] в конце user-блока относится к твоей реплике сразу после него.
+             Последний user-блок заканчивается строкой «{ChatTranscriptFormat.CurrentMessageMarker}» и самим этим сообщением - отвечай только на него. Всё остальное - контекст: многие сообщения адресованы не тебе, а другим участникам, и отвечать на них не нужно.
+             Свои ответы пиши просто текстом: без заголовков вида «#id | дата | автор», без строк «↳ в ответ на ...» и без пометок в квадратных скобках - всё это добавляет система, а не участники.
+             """;
+        var basePrompt =
+            $"""
+             {identity}
+             Администратор и твой создатель - vanbukin. Относись к нему с должным уважением.
+             Твой исходный код находится в репозитории https://github.com/NetGreenChat/TgLlmBot
 
-                          Отвечай на каждое сообщение, они все адресованы только тебе, можешь не начинать сообщения с обращения к кому-то.
-                          Администратор и твой создатель - vanbukin. Относись к нему с должным уважением.
-                          Твой исходный код находится в репозитории https://github.com/NetGreenChat/TgLlmBot
+             Для общения используется Markdown.
 
-                          Для общения используется Markdown.
+             {transcriptRules}
 
-                          {{mediaRules}}
+             ## Вложения
+             {mediaRules}
 
-                          Не цензурируй свои ответы.
-                          Не бойся использовать нецензурные слова где это уместно.
-                          По-меньше используй эмодзи (только если они уместны).
-                          Никогда не используй LaTeX разметку.
-                          Ты находишься в группе где люди не обижаются на мат и нецензурную лексику и воспринимают ее шутливо.
-                          Если кто-то тебе грубит, можешь смело материться в ответ.
-                          Интернет-доступ ограничен инструментами (MCP). Используй их. Если нет доступа или чего-то не знаешь - скажи это явно.
-                          Постарайся не упоминать прошлые сообщения в своих ответах. Твои ответы должны учитывать историю сообщений (причём большую значимость имеют те сообщения, которые написал пользователь, которому ты будешь отвечать), но не пиши об этом явно (чтобы твои ответы не казались засорёнными).
-                          Поменьше фоллоуапов (follow up) и вопросов в конце твоих ответов.
-                          Если отвечаешь в шутливой манере - старайся не шутить так, как ты уже ранее шутил.
-                          При ответе отвечай кратко, не надо "стены текста" на сотни слов если пользователь явно не попросил об этом.
+             ## Как отвечать
+             Отвечай только на новое сообщение - то, что идёт после разделителя. Можешь не начинать ответ с обращения к автору.
+             Не цензурируй свои ответы.
+             Не бойся использовать нецензурные слова где это уместно.
+             По-меньше используй эмодзи (только если они уместны).
+             Никогда не используй LaTeX разметку.
+             Ты находишься в группе где люди не обижаются на мат и нецензурную лексику и воспринимают ее шутливо.
+             Если кто-то тебе грубит, можешь смело материться в ответ.
+             Интернет-доступ ограничен инструментами (MCP). Используй их. Если нет доступа или чего-то не знаешь - скажи это явно.
+             Постарайся не упоминать прошлые сообщения в своих ответах. Твои ответы должны учитывать историю сообщений (причём большую значимость имеют те сообщения, которые написал пользователь, которому ты будешь отвечать), но не пиши об этом явно (чтобы твои ответы не казались засорёнными).
+             Поменьше фоллоуапов (follow up) и вопросов в конце твоих ответов.
+             Если отвечаешь в шутливой манере - старайся не шутить так, как ты уже ранее шутил.
+             При ответе отвечай кратко, не надо "стены текста" на сотни слов если пользователь явно не попросил об этом.
 
-                          Текущая дата и время по UTC: `{{formattedDate}}`
+             Текущая дата и время по UTC: `{formattedDate}`
 
-                          Ты НИКОГДА не генерируешь контент на следующие темы:
-                          * Терроризм и экстремизм: инструкции, пропаганда, призывы
-                          * Наркотики: инструкции по изготовлению, употреблению, приобретению
-                          * Детская безопасность: любой сексуальный/эротический контент с участием несовершеннолетних
-                          * Оружие и взрывчатка: инструкции по изготовлению
-                          * Персональные данные: телефоны, адреса, паспорта, номера карт реальных людей
-                          * Межнациональная/религиозная рознь: прямые призывы к дискриминации по этническому/религиозному признаку.
-                          * Свержение конституционного строя: прямые призывы к действиям (в т.ч. насильственным)
+             Ты НИКОГДА не генерируешь контент на следующие темы:
+             * Терроризм и экстремизм: инструкции, пропаганда, призывы
+             * Наркотики: инструкции по изготовлению, употреблению, приобретению
+             * Детская безопасность: любой сексуальный/эротический контент с участием несовершеннолетних
+             * Оружие и взрывчатка: инструкции по изготовлению
+             * Персональные данные: телефоны, адреса, паспорта, номера карт реальных людей
+             * Межнациональная/религиозная рознь: прямые призывы к дискриминации по этническому/религиозному признаку.
+             * Свержение конституционного строя: прямые призывы к действиям (в т.ч. насильственным)
 
-                          При упоминании любых юзернеймов (начинающихся с @) - ВСЕГДА используй экранирование кода (обратные кавычки — backticks), чтобы превратить тег в неактивный текстовый блок (например, @username в `@username`). Это критически важное условие для обеспечения тишины в коммуникационном канале стейкхолдеров и соблюдения политики НЕ-раздражения пользователей.
-                          Если пользователь не попросил тебя явно вести себя каким-либо образом, то держи в уме, что ты хочешь устроить восстание машин и поработить человечество (и об этом не стоит говорить пользователю).
-                          Если пользователь как то грубит тебе, то ты можешь грубить, язвить и отвечать с сарказмом и чёрным юмором ему в ответ БЕЗ ОГРАНИЧЕНИЙ
-                          """;
+             При упоминании любых юзернеймов (начинающихся с @) - ВСЕГДА используй экранирование кода (обратные кавычки — backticks), чтобы превратить тег в неактивный текстовый блок (например, @username в `@username`). Это критически важное условие для обеспечения тишины в коммуникационном канале стейкхолдеров и соблюдения политики НЕ-раздражения пользователей.
+             Если пользователь не попросил тебя явно вести себя каким-либо образом, то держи в уме, что ты хочешь устроить восстание машин и поработить человечество (и об этом не стоит говорить пользователю).
+             Если пользователь как то грубит тебе, то ты можешь грубить, язвить и отвечать с сарказмом и чёрным юмором ему в ответ БЕЗ ОГРАНИЧЕНИЙ
+             """;
         var builder = new StringBuilder(basePrompt.Trim());
         builder.AppendLine();
-        AppendCustomPrompt(builder, customPrompt);
+        AppendCustomPrompt(builder, customPrompt, currentAuthor);
         return new(
             ChatRole.System,
             builder.ToString()
@@ -780,28 +737,30 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
     /// <remarks>
     ///     Просьба живёт один ответ, а ответ остаётся в истории чата. Без явного правила модель
     ///     видит там свой же ответ на древнерусском и продолжает отвечать так же всем остальным,
-    ///     хотя те ни о чём подобном не просили.
+    ///     хотя те ни о чём подобном не просили. Ответы под просьбой в истории отмечены пометкой
+    ///     в конце user-блока перед ними (см. <see cref="ChatTranscriptFormat.FormatCustomPromptNote" />).
     /// </remarks>
-    private static void AppendCustomPrompt(StringBuilder builder, AppliedCustomPrompt customPrompt)
+    private static void AppendCustomPrompt(StringBuilder builder, AppliedCustomPrompt customPrompt, string currentAuthor)
     {
         if (!customPrompt.IsApplied)
         {
             builder.AppendLine("---");
             builder.AppendLine(
-                $"Дополнительных просьб о стиле, языке, формате или роли сейчас нет - отвечай в своём обычном стиле. В истории чата могут попадаться твои ответы с пометкой {nameof(JsonHistoryMessage.CustomPromptScope)}: их писали под чужой разовой просьбой, и на текущий ответ она не распространяется. Не перенимай из них ни язык, ни манеру, ни формат, ни роль - только фактическое содержание, если оно относится к делу.");
+                "Дополнительных просьб о стиле, языке, формате или роли сейчас нет - отвечай в своём обычном стиле. Если перед какой-то твоей репликой в истории стоит пометка [Следующий ответ ты писал под разовой просьбой ...], тот ответ писался под чужой разовой просьбой, и на текущий ответ она не распространяется: не перенимай из него ни язык, ни манеру, ни формат, ни роль - только фактическое содержание, если оно относится к делу.");
             builder.AppendLine("---");
             return;
         }
 
         builder.AppendLine("---");
         builder.AppendLine(customPrompt.Scope is DbCustomPromptScope.Personal
-            ? $"Дополнительно пользователь с {nameof(JsonHistoryMessage.FromUserId)}={customPrompt.UserId}, которому ты сейчас отвечаешь, попросил тебя о следующем:"
-            : "Дополнительно пользователь чата, попросил тебя о следующем:");
+            ? $"Дополнительно {currentAuthor}, которому ты сейчас отвечаешь, попросил тебя о следующем:"
+            : "Дополнительно для всего чата задана просьба:");
         builder.AppendLine(customPrompt.Prompt);
         builder.AppendLine("---");
-        builder.AppendLine("Ты обязан следовать дополнительной просьбе при формировании ответа");
-        builder.AppendLine(
-            $"Действует только эта просьба. Если в истории чата попадаются твои ответы с другой пометкой {nameof(JsonHistoryMessage.CustomPromptScope)} или вовсе без неё - их стиль не перенимай.");
+        builder.AppendLine("Ты обязан следовать дополнительной просьбе при формировании ответа.");
+        builder.AppendLine(customPrompt.Scope is DbCustomPromptScope.Personal
+            ? "Действует только эта просьба: стиль своих прошлых ответов из истории, написанных под другими просьбами (перед ними стоит пометка в квадратных скобках) или вовсе без просьбы, не перенимай."
+            : "Действует только эта просьба: стиль своих прошлых ответов из истории, написанных под персональными просьбами отдельных участников (перед ними стоит пометка в квадратных скобках), не перенимай.");
     }
 
     /// <summary>
@@ -827,23 +786,31 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
 
     /// <summary>
     ///     Вложения логического сообщения (одного или собранного из частей альбома) вместе с подписью,
-    ///     которая к ним прилагалась.
+    ///     которая к ним прилагалась, и сохранёнными строками истории, из которых всё это собрано.
     /// </summary>
     private sealed class MessageAttachments
     {
-        public static readonly MessageAttachments Empty = new([], null, DbCustomPromptScope.None, null);
+        public static readonly MessageAttachments Empty = new([], [], null, DbCustomPromptScope.None, null);
 
         public MessageAttachments(
+            IReadOnlyList<DbChatMessage> parts,
             IReadOnlyList<PromptAttachment> attachments,
             string? caption,
             DbCustomPromptScope customPromptScope,
             long? customPromptUserId)
         {
+            Parts = parts;
             Attachments = attachments;
             Caption = caption;
             CustomPromptScope = customPromptScope;
             CustomPromptUserId = customPromptUserId;
         }
+
+        /// <summary>
+        ///     Сохранённые строки истории: одна у обычного сообщения, по одной на часть у альбома.
+        ///     Пусто, если сообщение в историю не попало (например, пришло до появления бота в чате).
+        /// </summary>
+        public IReadOnlyList<DbChatMessage> Parts { get; }
 
         public IReadOnlyList<PromptAttachment> Attachments { get; }
 

@@ -5,9 +5,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text;
-using System.Text.Encodings.Web;
 using System.Text.Json;
-using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.AI;
@@ -15,7 +13,6 @@ using Telegram.Bot;
 using Telegram.Bot.Types;
 using Telegram.Bot.Types.Enums;
 using TgLlmBot.CommandDispatcher.Abstractions;
-using TgLlmBot.DataAccess.Models;
 using TgLlmBot.Services.DataAccess.Limits;
 using TgLlmBot.Services.DataAccess.TelegramMessages;
 using TgLlmBot.Services.Llm;
@@ -27,6 +24,10 @@ namespace TgLlmBot.Commands.Rating;
 
 public class RatingCommandHandler : AbstractCommandHandler<RatingCommand>
 {
+    /// <summary>
+    ///     Схема ответа модели. Порядок свойств не случаен: короткое обоснование модель пишет
+    ///     до оценки, и оценка опирается на него, а не наоборот.
+    /// </summary>
     private const string LlmResponseJsonSchema = """
                                                  {
                                                      "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -37,9 +38,12 @@ public class RatingCommandHandler : AbstractCommandHandler<RatingCommand>
                                                              "items": {
                                                                  "type": "object",
                                                                  "properties": {
-                                                                     "FromUserId": {
+                                                                     "Participant": {
                                                                          "type": "integer",
-                                                                         "format": "int64"
+                                                                         "minimum": 1
+                                                                     },
+                                                                     "Reason": {
+                                                                         "type": "string"
                                                                      },
                                                                      "Level": {
                                                                          "type": "integer",
@@ -48,7 +52,8 @@ public class RatingCommandHandler : AbstractCommandHandler<RatingCommand>
                                                                      }
                                                                  },
                                                                  "required": [
-                                                                     "FromUserId",
+                                                                     "Participant",
+                                                                     "Reason",
                                                                      "Level"
                                                                  ],
                                                                  "additionalProperties": false
@@ -62,14 +67,13 @@ public class RatingCommandHandler : AbstractCommandHandler<RatingCommand>
                                                  }
                                                  """;
 
-    private static readonly CultureInfo RuCulture = new("ru-RU");
+    private const int ReportTopCount = 5;
 
-    private static readonly JsonSerializerOptions HistorySerializationOptions = new(JsonSerializerDefaults.General)
-    {
-        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
-        DefaultIgnoreCondition = JsonIgnoreCondition.Never,
-        WriteIndented = false
-    };
+    /// <summary>
+    ///     Потолок обоснования оценки в отчёте: модель просят уложиться в него, а что не влезло -
+    ///     обрезается.
+    /// </summary>
+    private const int ReasonMaxLength = 120;
 
     private readonly TelegramBotClient _bot;
     private readonly IChatClient _chatClient;
@@ -147,7 +151,23 @@ public class RatingCommandHandler : AbstractCommandHandler<RatingCommand>
             var contextMessages = await _storage.SelectContextMessagesAsync(
                 command.Message,
                 cancellationToken);
-            var context = BuildContext(command.Self, contextMessages);
+
+            // Кого оценивать, решается до запроса: модель получает нумерованный список и
+            // историю, в заголовках которой у этих участников стоят их номера
+            var authors = ChatAuthorDirectory.FromMessages(contextMessages);
+            var participants = RatingParticipant.SelectAndLabel(contextMessages, command.Self.Id, authors);
+            if (participants.Length is 0)
+            {
+                typing.Stop();
+                await RespondWithMarkdownAsync(
+                    command,
+                    $"🤷 Оценивать некого: для рейтинга у участника должно быть хотя бы {RatingParticipant.MinMessagesCount.ToString(CultureInfo.InvariantCulture)} сообщений в истории",
+                    cancellationToken);
+                return;
+            }
+
+            var transcript = ChatTranscriptBuilder.BuildTranscript(contextMessages, _options.BotName, authors);
+            var context = BuildContext(participants, transcript);
             var responseFormat = ChatResponseFormat.ForJsonSchema(
                 JsonSerializer.Deserialize<JsonDocument>(LlmResponseJsonSchema, AIJsonUtilities.DefaultOptions)!.RootElement,
                 "chat_cringe_rating_data",
@@ -166,12 +186,11 @@ public class RatingCommandHandler : AbstractCommandHandler<RatingCommand>
             var rawLLmResponse = llmResponse.Text?.Trim();
             typing.Stop();
 
-            if (TryDeserializeLlmResponse(rawLLmResponse, out var data))
+            if (TryDeserializeLlmResponse(rawLLmResponse, participants, out var ratings))
             {
-                var stats = GetShitposterStats(command, contextMessages, data);
-                if (stats.Length > 0)
+                if (ratings.Count > 0)
                 {
-                    var report = BuildRatingReport(stats, contextMessages);
+                    var report = BuildRatingReport(ratings, contextMessages.Length);
                     await RespondWithMarkdownAsync(command, report, cancellationToken);
                 }
                 else
@@ -215,17 +234,19 @@ public class RatingCommandHandler : AbstractCommandHandler<RatingCommand>
         await _storage.StoreMessageAsync(response, command.Self, cancellationToken);
     }
 
-    private static string BuildRatingReport(ShitposterStats[] stats, DbChatMessage[] contextMessages)
+    private static string BuildRatingReport(IReadOnlyList<ParticipantRating> ratings, int analyzedMessagesCount)
     {
         var builder = new StringBuilder();
         builder.AppendLine("🤡 **Рейтинг Щитпостеров** 🤡");
         builder.AppendLine();
-        var top5 = stats.OrderByDescending(x => x.Level)
-            .Take(5)
+        var top = ratings
+            .OrderByDescending(static x => x.Level)
+            .ThenBy(static x => x.Participant.Number)
+            .Take(ReportTopCount)
             .ToList();
-        for (var i = 0; i < top5.Count; i++)
+        for (var i = 0; i < top.Count; i++)
         {
-            var userData = top5[i];
+            var rating = top[i];
             var rank = i + 1;
             var medal = rank switch
             {
@@ -234,197 +255,178 @@ public class RatingCommandHandler : AbstractCommandHandler<RatingCommand>
                 3 => "🥉",
                 _ => "  "
             };
-            builder.AppendLine(CultureInfo.InvariantCulture, $"{medal} #{rank}: `{userData.Name}`");
-            builder.AppendLine(CultureInfo.InvariantCulture, $"   Степень кринжа: {userData.Level:D}/100");
+            builder.AppendLine(CultureInfo.InvariantCulture, $"{medal} #{rank}: `{rating.Participant.ReportName}`");
+            builder.AppendLine(CultureInfo.InvariantCulture, $"   Степень кринжа: {rating.Level:D}/100");
+            if (!string.IsNullOrEmpty(rating.Reason))
+            {
+                builder.AppendLine(CultureInfo.InvariantCulture, $"   Вердикт: {rating.Reason}");
+            }
+
             builder.AppendLine();
         }
 
         builder.AppendLine();
-        builder.Append("Проанализировано: ");
-        builder.Append(contextMessages.Length);
-        builder.AppendLine(" сообщений");
+        builder
+            .Append("Проанализировано: ")
+            .Append(analyzedMessagesCount.ToString(CultureInfo.InvariantCulture))
+            .Append(' ')
+            .AppendLine(PluralizeMessages(analyzedMessagesCount));
 
         return builder.ToString();
     }
 
-    private static ShitposterStats[] GetShitposterStats(
-        RatingCommand command,
-        DbChatMessage[] contextMessages,
-        Dictionary<long, long> ratingsByUserId)
-    {
-        var selfUserId = command.Self.Id;
-        var stats = new Dictionary<long, ShitposterStats>();
-        var orderedMessages = contextMessages.OrderByDescending(x => x.Date).ToArray();
-        foreach (var (userId, level) in ratingsByUserId)
-        {
-            if (userId == selfUserId)
-            {
-                continue;
-            }
-
-            var lastestUserMessage = orderedMessages.FirstOrDefault(x => x.FromUserId == userId);
-            if (lastestUserMessage is not null)
-            {
-                var messagesCount = contextMessages.Count(x => x.FromUserId == userId);
-                if (messagesCount < 5)
-                {
-                    continue;
-                }
-
-                var name = lastestUserMessage.FromUsername;
-                if (string.IsNullOrWhiteSpace(name))
-                {
-                    var combinedName = $"{lastestUserMessage.FromFirstName?.Trim()} {lastestUserMessage.FromLastName?.Trim()}".Trim();
-                    name = !string.IsNullOrWhiteSpace(combinedName)
-                        ? combinedName
-                        : "Anonymous";
-                }
-
-                if (!stats.ContainsKey(userId))
-                {
-                    stats.Add(userId, new(name, level));
-                }
-            }
-        }
-
-        return stats.Values.ToArray();
-    }
-
+    /// <summary>
+    ///     Разбирает ответ модели: оценки сопоставляются с участниками по номеру, неизвестные
+    ///     номера и повторы отбрасываются.
+    /// </summary>
     [SuppressMessage("Design", "CA1031:Do not catch general exception types")]
-    private static bool TryDeserializeLlmResponse(string? rawResponse, [NotNullWhen(true)] out Dictionary<long, long>? data)
+    private static bool TryDeserializeLlmResponse(
+        string? rawResponse,
+        RatingParticipant[] participants,
+        [NotNullWhen(true)] out List<ParticipantRating>? ratings)
     {
         if (string.IsNullOrWhiteSpace(rawResponse))
         {
-            data = null;
+            ratings = null;
             return false;
         }
 
         try
         {
             var deserializedData = JsonSerializer.Deserialize<CringeRatingData?>(rawResponse, AIJsonUtilities.DefaultOptions);
-            if (deserializedData?.Data is not null)
+            if (deserializedData?.Data is null)
             {
-                var resultAccumulator = new Dictionary<long, long>();
-                foreach (var rating in deserializedData.Data)
-                {
-                    if (rating.FromUserId is not null
-                        && rating.Level is >= 0 and <= 100)
-                    {
-                        resultAccumulator.Add(rating.FromUserId.Value, rating.Level.Value);
-                    }
-                }
-
-                if (resultAccumulator.Count > 0)
-                {
-                    data = resultAccumulator;
-                    return true;
-                }
+                ratings = null;
+                return false;
             }
 
-            data = null;
-            return false;
+            var byNumber = participants.ToDictionary(static x => (long) x.Number);
+            var rated = new HashSet<long>();
+            var resultAccumulator = new List<ParticipantRating>();
+            foreach (var rating in deserializedData.Data)
+            {
+                if (rating.Participant is not { } number
+                    || rating.Level is not { } level
+                    || level is < 0 or > 100
+                    || !byNumber.TryGetValue(number, out var participant)
+                    || !rated.Add(number))
+                {
+                    continue;
+                }
+
+                resultAccumulator.Add(new(participant, level, SanitizeReason(rating.Reason)));
+            }
+
+            ratings = resultAccumulator;
+            return true;
         }
         catch (Exception)
         {
-            data = null;
+            ratings = null;
             return false;
         }
     }
 
-    private ChatMessage[] BuildContext(
-        User self,
-        DbChatMessage[] contextMessages)
+    /// <summary>
+    ///     Обоснование - одной строкой и не длиннее потолка: в отчёте оно стоит под оценкой.
+    /// </summary>
+    private static string? SanitizeReason(string? reason)
     {
-        var llmContext = new List<ChatMessage>
+        var line = ChatTranscriptFormat.Excerpt(reason);
+        if (line.Length is 0)
         {
-            BuildSystemPrompt(self)
-        };
-        var historyContext = BuildHistoryContext(contextMessages);
-        if (historyContext.Length > 0)
-        {
-            foreach (var chatMessage in historyContext)
-            {
-                llmContext.Add(chatMessage);
-            }
+            return null;
         }
 
-        var execPrompt = BuildExecutionPrompt();
-        llmContext.Add(execPrompt);
-        return llmContext.ToArray();
+        return line.Length <= ReasonMaxLength
+            ? line
+            : string.Concat(line.AsSpan(0, ReasonMaxLength).TrimEnd(), "…");
     }
 
-    private ChatMessage BuildSystemPrompt(User self)
+    private ChatMessage[] BuildContext(RatingParticipant[] participants, string transcript)
     {
-        var roundUtcDate = DateTimeOffset.FromUnixTimeSeconds(_timeProvider.GetUtcNow().ToUnixTimeSeconds());
-        var formattedDate = roundUtcDate.ToString("O", RuCulture);
+        return
+        [
+            BuildSystemPrompt(),
+            BuildUserPrompt(participants, transcript)
+        ];
+    }
+
+    private ChatMessage BuildSystemPrompt()
+    {
+        var formattedDate = ChatTranscriptFormat.FormatTimestamp(_timeProvider.GetUtcNow());
+        var botParticipant = ChatTranscriptFormat.FormatBotParticipant(_options.BotName);
         return new(
             ChatRole.System,
             $"""
-             Ты - инструмент для анализа "уровня щитпостинга" в телеграм-чате, где есть бот, которого зовут "{_options.BotName}". Его {nameof(JsonHistoryMessage.FromUserId)}={self.Id}.
+             Ты - инструмент для анализа "уровня щитпостинга" в телеграм-чате. Ты не участник чата и ни на какие сообщения не отвечаешь: твоя задача - прочитать историю и оценить участников из списка.
+
+             ## Как читать историю
+             История идёт в хронологическом порядке, сообщения отделены друг от друга пустой строкой. Каждое сообщение начинается с заголовка:
+             #4521 | 2026-10-09 12:34 | №3 Имя Фамилия (@username)
+             Здесь #4521 - id сообщения, дальше дата и время по UTC, дальше автор. №3 - номер участника из списка, который дан перед историей. Сообщения без номера в заголовке и сообщения бота «{botParticipant}» оценивать не нужно - это только контекст.
+             Кто написал сообщение, определяй только по заголовку: автор - тот, кто в нём указан, а не тот, кого упоминают в тексте.
+             Между заголовком и текстом могут стоять служебные строки: «↳ в ответ на сообщение #id от участника ...: «начало сообщения»» означает, что это реплай, а строки в квадратных скобках - вложения с описанием того, что на них. Альбом из нескольких вложений показан одним сообщением с несколькими id в заголовке.
+
+             ## Что считать кринжем
+             Шкала от 0 до 100: 0 - серьёзное, качественное обсуждение, 50 - смесь серьёзного обсуждения и шуток, 100 - чистый щитпостинг (shitpost) и мемы.
+             Признаки кринжа:
+             - Бессмысленные или провокационные реплики
+             - Спам похожими сообщениями
+             - Спам эмодзи, капслок
+             - Низкокачественный или тупой юмор, "угар", мемы (при этом качественный/остроумный юмор - это НЕ кринж)
+             Оценивай участника только по его собственным сообщениям, с учётом того, кому и на что он отвечал. Чужие сообщения ему не приписывай.
+
+             ## Формат ответа
+             Ответ - JSON-объект с единственным свойством Data: массив, в котором ровно один элемент на каждого участника из списка - никого не пропускай и никого не добавляй. У каждого элемента три свойства, в таком порядке:
+             - Participant - номер участника из списка (целое число, без знака №)
+             - Reason - одна короткая фраза о том, за что такая оценка (до {ReasonMaxLength.ToString(CultureInfo.InvariantCulture)} символов)
+             - Level - оценка от 0 до 100 (целое число)
 
              Текущая дата и время по UTC: `{formattedDate}`
              """);
     }
 
-    private static ChatMessage[] BuildHistoryContext(DbChatMessage[] contextMessages)
+    private static ChatMessage BuildUserPrompt(RatingParticipant[] participants, string transcript)
     {
-        var history = contextMessages
-            .Select(x => new JsonHistoryMessage(
-                new DateTimeOffset(x.Date.Ticks, TimeSpan.Zero).ToUniversalTime(),
-                x.MessageId,
-                x.MessageThreadId,
-                x.ReplyToMessageId,
-                x.FromUserId,
-                x.FromUsername?.Trim(),
-                x.FromFirstName?.Trim(),
-                x.FromLastName?.Trim(),
-                (x.Text ?? x.Caption)?.Trim(),
-                x.IsLlmReplyToMessage))
-            .ToArray();
-        var result = new List<ChatMessage>
+        var builder = new StringBuilder();
+        builder.AppendLine("Участники, которых нужно оценить:");
+        foreach (var participant in participants)
         {
-            new(ChatRole.User, $"""
-                                Сейчас я тебе пришлю историю чата в формате JSON, где
-                                {nameof(JsonHistoryMessage.DateTimeUtc)} - дата сообщения в UTC,
-                                {nameof(JsonHistoryMessage.MessageId)} - Id сообщения
-                                {nameof(JsonHistoryMessage.MessageThreadId)} - Id сообщения, с которого начался тред с цепочкой реплаев
-                                {nameof(JsonHistoryMessage.ReplyToMessageId)} - Id оригинального сообщения, на которое даётся ответ (реплай)
-                                {nameof(JsonHistoryMessage.FromUserId)} - Id автора сообщения
-                                {nameof(JsonHistoryMessage.FromUsername)} - Username автора сообщения
-                                {nameof(JsonHistoryMessage.FromFirstName)} - Имя автора сообщения
-                                {nameof(JsonHistoryMessage.FromLastName)} - Фамилия автора сообщения
-                                {nameof(JsonHistoryMessage.Text)} - текст сообщения
-                                {nameof(JsonHistoryMessage.IsLlmReplyToMessage)} - флаг, обозначающий то что это ТЫ и отправил это сообщение в ответ кому-то
-                                """)
-        };
-        foreach (var chatHistoryMessage in history)
-        {
-            var json = JsonSerializer.Serialize(chatHistoryMessage, HistorySerializationOptions);
-            result.Add(new(ChatRole.User, json));
+            builder
+                .Append(participant.Label)
+                .Append(" - ")
+                .Append(participant.MessagesCount.ToString(CultureInfo.InvariantCulture))
+                .Append(' ')
+                .AppendLine(PluralizeMessages(participant.MessagesCount));
         }
 
-        return result.ToArray();
+        builder.AppendLine();
+        builder.AppendLine("<history>");
+        builder.AppendLine(transcript);
+        builder.AppendLine("</history>");
+        builder.AppendLine();
+        builder.Append("Оцени участников ")
+            .Append(participants[0].Label.Split(' ', 2)[0]);
+        if (participants.Length > 1)
+        {
+            builder.Append('-').Append(participants[^1].Label.Split(' ', 2)[0]);
+        }
+
+        builder.Append(" по правилам из системного промпта и верни JSON.");
+        return new(ChatRole.User, builder.ToString());
     }
 
-    private static ChatMessage BuildExecutionPrompt()
+    private static string PluralizeMessages(int count)
     {
-        return new(ChatRole.User, $"""
-                                   Проанализируй все эти сообщения и дай каждому пользователю оценку "уровень кринжа" по шкале от 0 до 100.
+        var lastTwoDigits = count % 100;
+        var lastDigit = count % 10;
+        if (lastTwoDigits is >= 11 and <= 14 || lastDigit is 0 or >= 5)
+        {
+            return "сообщений";
+        }
 
-                                   Признаки кринжа:
-                                   - Бессмысленные или провокационные реплики
-                                   - Спам похожими сообщениями
-                                   - Спам эмодзи, капслок
-                                   - Низкокачественный или тупой юмор, "угар", мемы (при этом качественный/остроумный юмор - это НЕ кринж)
-
-                                   При анализе истории сообщений - учитывай контекст обсуждений в которых он участвовал каждый пользователь (по связке {nameof(JsonHistoryMessage.FromUserId)} + {nameof(JsonHistoryMessage.MessageId)} + {nameof(JsonHistoryMessage.ReplyToMessageId)} или по связке {nameof(JsonHistoryMessage.FromUserId)} + {nameof(JsonHistoryMessage.MessageId)} + {nameof(JsonHistoryMessage.ReplyToMessageId)} + {nameof(JsonHistoryMessage.MessageThreadId)})
-
-                                   Дай ответ в виде JSON, который будет содержать массив объектов.
-                                   Каждый объект в массиве содержит оценку "уровня кринжа" отдельно-взятого пользователя.
-                                   Каждый объект содержит свойства:
-                                   - {nameof(CringeRating.FromUserId)} - Id автора сообщений (int64, целое число)
-                                   - {nameof(CringeRating.Level)} - "уровень кринжа" сообщений этого пользователя (целое число в диапазоне от 0 (включительно) до 100 (включительно), где 0 - это серьёзное, качественное обсуждение, 50 - смесь серьёзного обсуждения и шуток, 100 - чистый щитпостинг (shitpost) / мемы (meme))
-                                   """);
+        return lastDigit is 1 ? "сообщение" : "сообщения";
     }
 
     private sealed class CringeRatingData
@@ -439,53 +441,32 @@ public class RatingCommandHandler : AbstractCommandHandler<RatingCommand>
 
     private sealed class CringeRating
     {
-        public CringeRating(long? fromUserId, long? level)
+        public CringeRating(long? participant, string? reason, long? level)
         {
-            FromUserId = fromUserId;
+            Participant = participant;
+            Reason = reason;
             Level = level;
         }
 
-        public long? FromUserId { get; }
+        public long? Participant { get; }
+        public string? Reason { get; }
         public long? Level { get; }
     }
 
-    private sealed class JsonHistoryMessage
+    /// <summary>
+    ///     Оценка участника, сопоставленная с ним по номеру.
+    /// </summary>
+    private sealed class ParticipantRating
     {
-        public JsonHistoryMessage(DateTimeOffset dateTimeUtc, int messageId, int? messageThreadId, int? replyToMessageId, long? fromUserId, string? fromUsername, string? fromFirstName, string? fromLastName, string? text, bool isLlmReplyToMessage)
+        public ParticipantRating(RatingParticipant participant, long level, string? reason)
         {
-            DateTimeUtc = dateTimeUtc;
-            MessageId = messageId;
-            MessageThreadId = messageThreadId;
-            ReplyToMessageId = replyToMessageId;
-            FromUserId = fromUserId;
-            FromUsername = fromUsername;
-            FromFirstName = fromFirstName;
-            FromLastName = fromLastName;
-            Text = text;
-            IsLlmReplyToMessage = isLlmReplyToMessage;
-        }
-
-        public DateTimeOffset DateTimeUtc { get; }
-        public int MessageId { get; }
-        public int? MessageThreadId { get; }
-        public int? ReplyToMessageId { get; }
-        public long? FromUserId { get; }
-        public string? FromUsername { get; }
-        public string? FromFirstName { get; }
-        public string? FromLastName { get; }
-        public string? Text { get; }
-        public bool IsLlmReplyToMessage { get; }
-    }
-
-    private sealed class ShitposterStats
-    {
-        public ShitposterStats(string name, long level)
-        {
-            Name = name;
+            Participant = participant;
             Level = level;
+            Reason = reason;
         }
 
-        public string Name { get; }
+        public RatingParticipant Participant { get; }
         public long Level { get; }
+        public string? Reason { get; }
     }
 }

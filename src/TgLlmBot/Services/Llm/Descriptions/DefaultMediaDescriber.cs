@@ -218,7 +218,7 @@ public partial class DefaultMediaDescriber : IMediaDescriber
             builder = builder
                 .AppendLine()
                 .AppendLine()
-                .AppendLine("Вот история чата до сообщения с вложением (JSON, по общему правилу: 200 сообщений или 30 000 символов):")
+                .AppendLine("Вот история чата до сообщения с вложением, в хронологическом порядке. Каждое сообщение начинается с заголовка «#id | дата | автор», сообщения бота подписаны «(бот)», строка «↳ в ответ на ...» означает реплай, строки в квадратных скобках - вложения:")
                 .AppendLine("<history>")
                 .AppendLine(historyContext)
                 .AppendLine("</history>")

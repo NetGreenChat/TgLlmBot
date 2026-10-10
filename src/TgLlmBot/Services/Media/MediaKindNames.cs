@@ -40,19 +40,4 @@ public static class MediaKindNames
             _ => "вложения"
         };
     }
-
-    /// <summary>
-    ///     Формы для счётного оборота: "картинку", "3 картинки", "5 картинок".
-    /// </summary>
-    public static (string One, string Few, string Many) DescribeCountable(DbMediaKind? kind)
-    {
-        return kind switch
-        {
-            DbMediaKind.Photo => ("картинку", "картинки", "картинок"),
-            DbMediaKind.Sticker => ("стикер", "стикера", "стикеров"),
-            DbMediaKind.Animation => ("гифку", "гифки", "гифок"),
-            DbMediaKind.Video => ("видео", "видео", "видео"),
-            _ => ("вложение", "вложения", "вложений")
-        };
-    }
 }

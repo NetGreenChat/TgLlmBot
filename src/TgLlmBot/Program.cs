@@ -332,7 +332,7 @@ public partial class Program
             hostLifetime.ApplicationStopping.Register(queues.Complete);
             return queues;
         });
-        builder.Services.AddSingleton(new MediaRecognitionBackgroundServiceOptions(MediaSweepInterval));
+        builder.Services.AddSingleton(new MediaRecognitionBackgroundServiceOptions(MediaSweepInterval, config.Telegram.BotName));
         builder.Services.AddHostedService<MediaRecognitionBackgroundService>();
         // LLM Chat
         builder.Services.AddSingleton(new DefaultLlmChatHandlerOptions(config.Telegram.BotName, config.Llm.DefaultResponse));

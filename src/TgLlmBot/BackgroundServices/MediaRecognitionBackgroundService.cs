@@ -235,7 +235,7 @@ public partial class MediaRecognitionBackgroundService : BackgroundService
 
             // История одна на всё сообщение - грузится лениво, по первому вложению, которое
             // реально придётся описывать
-            string? historyJson = null;
+            string? historyTranscript = null;
             var historyLoaded = false;
 
             foreach (var media in row.Media.OrderBy(static x => x.Order))
@@ -252,11 +252,11 @@ public partial class MediaRecognitionBackgroundService : BackgroundService
                         row.MessageId,
                         row.Date,
                         cancellationToken);
-                    historyJson = ChatHistoryJsonBuilder.BuildJsonHistory(history);
+                    historyTranscript = ChatTranscriptBuilder.BuildTranscript(history, _options.BotName);
                     historyLoaded = true;
                 }
 
-                var description = await DescribeAsync(row, media, relatedText, historyJson, cancellationToken);
+                var description = await DescribeAsync(row, media, relatedText, historyTranscript, cancellationToken);
                 if (description is not null)
                 {
                     media.ShortDescription = Truncate(description, MediaDescriptionLimits.ShortMaxLength);
@@ -298,7 +298,7 @@ public partial class MediaRecognitionBackgroundService : BackgroundService
         DbChatMessage row,
         DbChatMessageMedia media,
         string? relatedText,
-        string? historyJson,
+        string? historyTranscript,
         CancellationToken cancellationToken)
     {
         if (!_capabilities.Supports(media.Kind, media.IsAnimated))
@@ -359,7 +359,7 @@ public partial class MediaRecognitionBackgroundService : BackgroundService
             media.Kind,
             media.IsAnimated,
             relatedText,
-            historyJson);
+            historyTranscript);
         var described = await _describer.DescribeAsync(request, cancellationToken);
         if (described.IsFailed)
         {
