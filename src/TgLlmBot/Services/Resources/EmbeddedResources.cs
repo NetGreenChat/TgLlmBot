@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Diagnostics.CodeAnalysis;
 using System.IO;
 
@@ -8,6 +8,8 @@ public static class EmbeddedResources
 {
     public static readonly byte[] NoJpg = ReadResource("no.jpg");
     public static readonly byte[] StopJpg = ReadResource("stop.jpg");
+    public static readonly byte[] AlzJpg = ReadResource("alz.jpg");
+    public static readonly byte[] HandsJpg = ReadResource("hands.jpg");
 
     [SuppressMessage("Style", "IDE0063:Use simple \'using\' statement")]
     [SuppressMessage("ReSharper", "ConvertToUsingDeclaration")]

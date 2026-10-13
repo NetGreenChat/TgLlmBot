@@ -20,6 +20,7 @@ using TgLlmBot.Commands.SetLimit;
 using TgLlmBot.Commands.SetPersonalSystemPrompt;
 using TgLlmBot.Commands.ShowChatSystemPrompt;
 using TgLlmBot.Commands.ShowPersonalSystemPrompt;
+using TgLlmBot.Commands.Sticker;
 using TgLlmBot.Commands.Usage;
 using TgLlmBot.Services.DataAccess.TelegramMessages;
 using TgLlmBot.Services.Media;
@@ -61,6 +62,7 @@ public partial class DefaultTelegramCommandDispatcher : ITelegramCommandDispatch
     private readonly ShowChatSystemPromptCommandHandler _showChatSystemPrompt;
     private readonly ShowPersonalSystemPromptCommandHandler _showPersonalSystemPrompt;
     private readonly UsageCommandHandler _usage;
+    private readonly SendStickerCommandHandler _stickerHandler;
 
     public DefaultTelegramCommandDispatcher(
         DefaultTelegramCommandDispatcherOptions options,
@@ -81,6 +83,7 @@ public partial class DefaultTelegramCommandDispatcher : ITelegramCommandDispatch
         ShowPersonalSystemPromptCommandHandler showPersonalSystemPrompt,
         SetLimitCommandHandler setLimit,
         SetChatLimitCommandHandler setChatLimit,
+        SendStickerCommandHandler stickerHandler,
         IMediaRecognitionQueues mediaRecognitionQueues,
         IMediaGroupTracker mediaGroupTracker,
         ILogger<DefaultTelegramCommandDispatcher> logger)
@@ -103,6 +106,7 @@ public partial class DefaultTelegramCommandDispatcher : ITelegramCommandDispatch
         ArgumentNullException.ThrowIfNull(showPersonalSystemPrompt);
         ArgumentNullException.ThrowIfNull(setLimit);
         ArgumentNullException.ThrowIfNull(setChatLimit);
+        ArgumentNullException.ThrowIfNull(stickerHandler);
         ArgumentNullException.ThrowIfNull(mediaRecognitionQueues);
         ArgumentNullException.ThrowIfNull(mediaGroupTracker);
         ArgumentNullException.ThrowIfNull(logger);
@@ -124,6 +128,7 @@ public partial class DefaultTelegramCommandDispatcher : ITelegramCommandDispatch
         _showPersonalSystemPrompt = showPersonalSystemPrompt;
         _setLimit = setLimit;
         _setChatLimit = setChatLimit;
+        _stickerHandler = stickerHandler;
         _mediaRecognitionQueues = mediaRecognitionQueues;
         _mediaGroupTracker = mediaGroupTracker;
         _logger = logger;
@@ -264,6 +269,13 @@ public partial class DefaultTelegramCommandDispatcher : ITelegramCommandDispatch
         {
             var command = new SetLimitCommand(message, type, self);
             await _setLimit.HandleAsync(command, cancellationToken);
+            return;
+        }
+
+        if (rawPrompt.StartsWith("!sticker", StringComparison.Ordinal))
+        {
+            var command = new SendStickerCommand(message, type, self);
+            await _stickerHandler.HandleAsync(command, cancellationToken);
             return;
         }
 
