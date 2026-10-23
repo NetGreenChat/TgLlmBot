@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Build and test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 10.0.401
+
+      - name: Restore dependencies
+        run: dotnet restore TgLlmBot.slnx
+
+      - name: Build
+        run: dotnet build TgLlmBot.slnx --configuration Release --no-restore
+
+      - name: Test
+        run: dotnet test TgLlmBot.slnx --configuration Release --no-build --no-restore

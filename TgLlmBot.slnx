@@ -14,4 +14,7 @@
     <Folder Name="/root/src/">
         <Project Path="src/TgLlmBot/TgLlmBot.csproj"/>
     </Folder>
+    <Folder Name="/root/tests/">
+        <Project Path="tests/TgLlmBot.Tests/TgLlmBot.Tests.csproj"/>
+    </Folder>
 </Solution>

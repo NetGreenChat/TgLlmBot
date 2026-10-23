@@ -8,10 +8,12 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.AI;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Telegram.Bot;
 using Telegram.Bot.Types;
 using Telegram.Bot.Types.Enums;
+using TgLlmBot.Commands.Model;
 using TgLlmBot.Configuration.TypedConfiguration.Llm;
 using TgLlmBot.DataAccess.Models;
 using TgLlmBot.Services.DataAccess.Limits;
@@ -46,6 +48,7 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
     private readonly TelegramBotClient _bot;
     private readonly IChatClient _chatClient;
     private readonly LlmCapabilitiesConfiguration _capabilities;
+    private readonly AIFunction _modelInfoTool;
     private readonly ILlmLimitsService _limits;
     private readonly ILogger<DefaultLlmChatHandler> _logger;
     private readonly IMediaGroupTracker _mediaGroupTracker;
@@ -64,6 +67,7 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
         TelegramBotClient bot,
         IChatClient chatClient,
         LlmCapabilitiesConfiguration capabilities,
+        [FromKeyedServices(ModelInfoFormatter.ToolServiceKey)] AIFunction modelInfoTool,
         IMediaPreparer preparer,
         IMediaGroupTracker mediaGroupTracker,
         ISystemPromptService systemPrompt,
@@ -79,6 +83,7 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
         ArgumentNullException.ThrowIfNull(bot);
         ArgumentNullException.ThrowIfNull(chatClient);
         ArgumentNullException.ThrowIfNull(capabilities);
+        ArgumentNullException.ThrowIfNull(modelInfoTool);
         ArgumentNullException.ThrowIfNull(preparer);
         ArgumentNullException.ThrowIfNull(mediaGroupTracker);
         ArgumentNullException.ThrowIfNull(systemPrompt);
@@ -93,6 +98,7 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
         _bot = bot;
         _chatClient = chatClient;
         _capabilities = capabilities;
+        _modelInfoTool = modelInfoTool;
         _preparer = preparer;
         _mediaGroupTracker = mediaGroupTracker;
         _systemPrompt = systemPrompt;
@@ -145,7 +151,7 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
             var chatOptions = new ChatOptions
             {
                 ConversationId = Guid.NewGuid().ToString("N"),
-                Tools = [.. tools],
+                Tools = [.. tools, _modelInfoTool],
                 MaxOutputTokens = 81920,
                 AllowMultipleToolCalls = true,
                 ToolMode = new AutoChatToolMode(),
@@ -701,6 +707,7 @@ public partial class DefaultLlmChatHandler : ILlmChatHandler
              Ты находишься в группе где люди не обижаются на мат и нецензурную лексику и воспринимают ее шутливо.
              Если кто-то тебе грубит, можешь смело материться в ответ.
              Интернет-доступ ограничен инструментами (MCP). Используй их. Если нет доступа или чего-то не знаешь - скажи это явно.
+             Если пользователь спрашивает, на какой модели ты работаешь, вызывай инструмент `{ModelInfoFormatter.ToolName}` и отвечай по его результату.
              Постарайся не упоминать прошлые сообщения в своих ответах. Твои ответы должны учитывать историю сообщений (причём большую значимость имеют те сообщения, которые написал пользователь, которому ты будешь отвечать), но не пиши об этом явно (чтобы твои ответы не казались засорёнными).
              Поменьше фоллоуапов (follow up) и вопросов в конце твоих ответов.
              Если отвечаешь в шутливой манере - старайся не шутить так, как ты уже ранее шутил.
